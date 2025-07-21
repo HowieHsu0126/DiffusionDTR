@@ -1,0 +1,11 @@
+# Branch Value Estimation (BVE) baseline hyper-parameters
+lr: 3e-4
+hidden_dim: 64
+num_layers: 2
+dropout: 0.1
+lambda_reg: 0.05
+cql_n_samples: 20
+mixed_ratio: 0.5
+cql_target_gap: 2.0
+alpha: 0.5
+normalize_branch: true

@@ -1,0 +1,8 @@
+# Batch-Constrained Q-learning (BCQ) baseline hyper-parameters
+lr: 5e-5
+batch_size: 256
+buffer_capacity: 500000
+target_update_freq: 10000
+hidden_dim: 128
+perturbation_scale: 0.1
+n_perturb_samples: 10

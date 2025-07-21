@@ -1,0 +1,9 @@
+# PoG-BVE baseline hyper-parameters
+lr: 3e-4
+hidden_dim: 64
+num_layers: 2
+dropout: 0.1
+lambda_reg: 0.05
+alpha: 0.5
+cql_target_gap: 2.0
+normalize_branch: true

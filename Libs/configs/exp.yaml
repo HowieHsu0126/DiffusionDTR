@@ -1,0 +1,96 @@
+experiment:
+  seed: 42 # default seed
+  verbose: true # Enable verbose logging for debugging
+  device: cpu # CUDA device to use for training. [cuda:0, cuda:1, cuda:2, cuda:3]
+  gamma: 0.99 # discount factor
+  n_epochs: 1 # default training epochs
+  batch_size: 64 # default batch size
+  bootstrap_iters: 1000 # default bootstrap resamples for CI
+  ci_alpha: 0.05 # two-sided significance level for CI
+  policy_mode: greedy # {greedy|sample|temperature}
+  temperature: 1.0 # default softmax temperature
+  fqe_epochs: 5 # default FQE epochs
+  fqe_lr: 1e-3 # default FQE learning rate
+  fqe_batch_size: 128 # default mini-batch size for FQE
+  cql_alpha: 0.1 # default CQL alpha
+  val_split: 0.1 # default validation split
+  test_split: 0.1 # default test split
+
+  # ---------------- Task Configuration ----------------
+  # Task to run experiments on: iv, rrt, vent
+  # This setting controls which task will be executed
+  task: rrt # Options: {iv|rrt|vent}
+
+  # Algorithms to be run in a single batch experiment
+  algos:
+    [
+      physician,
+      bc,
+      dqn,
+      cql,
+      bcq,
+      bve,
+      pog_bc,
+      pog_dqn,
+      pog_cql,
+      pog_bcq,
+      pog_bve,
+    ]
+
+  # Enable First-order FQE evaluation post-training
+  enable_fqe: true
+
+  # ---------------- Directory Configuration ----------------
+  # Paths follow current project structure: Input/, Output/, Libs/
+  # Task-specific subdirectories will be created automatically
+  log_root: Output/runs # Base directory for training logs
+  results_base: Output/results/experiment_results # Base path for results files (task name will be appended)
+
+  # ---------------- Checkpoint Configuration ----------------
+  # Disable checkpoint saving as requested
+  save_checkpoint: false
+  checkpoint_dir: null # No checkpoint directory needed
+  load_checkpoint: false # No checkpoint loading
+
+  # Mixed-precision flag - 启用以提升性能
+  amp: true
+
+  # ---------------- Visualization Configuration ----------------
+  visualization:
+    enable: true # Enable automatic visualization generation
+    style: "publication" # Visualization style: publication, presentation, poster
+    formats: ["png", "pdf"] # Output formats: png, pdf, svg, eps
+    include_convergence: true # Generate convergence diagnostics
+    include_strategy: false # Generate treatment strategy analysis (requires more computation)
+    include_comparison: true # Generate algorithm comparison charts
+    save_individual: true # Save individual algorithm visualizations
+    save_comparison: true # Save experiment-wide comparison charts
+
+  # ---------------- Early-Stopping hyper-parameters ----------------
+  early_stop_metric: wdr_reward # metric monitored on validation set (wdr_reward, ipw_reward, ips_survival, fqe_est)
+  early_stop_patience: 15 # epochs without improvement before stop (increased for stability)
+  early_stop_rel_delta: 0.001 # relative improvement threshold (increased for better convergence)
+  early_stop_warmup: 5 # epochs to wait before monitoring metric (increased for warm-up)
+
+  # ---------------- Behaviour Policy & OPE hyper-parameters ----------------
+  behav_policy_mode: logistic # {logistic|empirical}
+  behav_prob_min: 1.0e-6 # Minimum behaviour probability for IS weight stability
+  behav_prob_max: 0.999 # Maximum behaviour probability (1 - epsilon)
+  pi_eps: 5.0e-2 # Initial epsilon for π smoothing (decays during training)
+  clip_range: 5.0 # Max clipping value for importance weights
+  max_joint_enum: 5000 # Max joint action enumeration size for value estimation
+  use_psis: true # Whether to apply Pareto-smoothed IS
+  boltz_tau: 0.2 # Default Boltzmann temperature when enabled
+
+model:
+  state_dim: 64 # dimensionality of state vector
+  hidden_dim: 128 # shared hidden layer size for MLP backbones
+  learning_rate: 1.0e-3 # global LR; can be overridden per-algorithm
+
+# Reward processing hyper-parameters
+reward:
+  centering: false # 禁用奖励中心化 - 修复DQN训练损失为0的问题
+  centering_alpha: 0.001 # EMA step size α for running mean update
+  scale_method: identity # {identity|sigmoid|tanh|none}
+  temperature: 0.2 # softmax temperature for reward shaping
+  time_decay: 1.0 # exponential time decay factor (if used)

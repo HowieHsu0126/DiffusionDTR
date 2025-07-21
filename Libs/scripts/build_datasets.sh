@@ -1,0 +1,1 @@
+nohup python -m Libs.data.build_dataset --all-tasks > Output/logs/build_dataset.log 2>&1 &

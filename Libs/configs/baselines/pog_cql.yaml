@@ -1,0 +1,6 @@
+# Plan-on-Graph Conservative Q-learning (POG_CQL) baseline hyper-parameters
+lr: 3e-4  # 从默认值降低学习率以提升稳定性
+cql_alpha: 0.1  # 从1.0降低到0.1修复数值异常
+cql_target_gap: 5.0  # 保持合理的目标间隙
+batch_size: 64  # 降低batch_size以提升性能
+target_update_freq: 1000  # 提升训练效率

@@ -1,0 +1,17 @@
+# PoG-DQN baseline hyper-parameters (inherits DQN defaults)
+# 优化后的配置以确保训练稳定性
+
+# 学习率设置 - 适中的学习率有助于稳定训练
+lr: 5e-4
+
+# 禁用奖励中心化 - 修复训练损失为0的问题
+reward_centering: false
+
+# 梯度裁剪 - 防止梯度爆炸和消失
+max_grad_norm: 2.0
+
+# 目标网络更新频率 - 更频繁的更新有助于训练稳定性
+target_update_freq: 100
+
+# 批次大小 - 平衡训练效率和稳定性
+batch_size: 64

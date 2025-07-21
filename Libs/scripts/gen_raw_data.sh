@@ -1,0 +1,1 @@
+PGPASSWORD=123 nohup psql -U hwxu -d mimiciv -c "\pset pager off" -f Libs/data/sql/main.sql > Output/logs/pgsql.log 2>&1 &

@@ -1,0 +1,3 @@
+# PoG-BCQ baseline hyper-parameters (inherits BCQ defaults)
+lr: 5e-4
+perturbation_scale: 0.1

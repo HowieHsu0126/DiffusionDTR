@@ -1,0 +1,137 @@
+# Dataset configuration for MIMIC-IV ICU AKI cohort
+# All keys are merged into *root* namespace for backward‐compatibility.
+
+name: mimic_iv_aki
+# Base path for processed data - task-specific subdirectories will be created
+data_root: Input/processed
+# Directory where raw CSVs extracted from PostgreSQL are located
+raw_dir: Input/raw
+
+# ------------------------------------------------------------------
+# Task Configuration - specify which task to build
+# ------------------------------------------------------------------
+task: vent  # Options: vent, rrt, iv
+# Alternative: Can be overridden via CLI: --task vent
+
+# ------------------------------------------------------------------
+# Processing Configuration - shared across all tasks
+# ------------------------------------------------------------------
+# ID columns to preserve during preprocessing
+id_cols: [subject_id, hadm_id, stay_id, hours_from_onset]
+
+# Processing parameters
+chunk_size: 50000 # Rows per chunk for trajectory builder
+resample_hours: 4 # Time window for flooring charttime in Preprocessor
+graph_k: 3 # k in k-NN graph
+graph_T_max: 30 # Max trajectory length when encoding
+cohort_name: ICU_AKI
+
+# Train / Val / Test split ratios - cal removed as requested
+train_split: 0.7
+val_split: 0.2
+test_split: 0.1
+
+# ------------------------------------------------------------------
+# Reward shaping parameters (SOFA + lactate) - shared across tasks
+# ------------------------------------------------------------------
+reward_shaping:
+  c0: -0.025 # stability bonus
+  c1: -0.125 # ΔSOFA (now normalized by SOFA range 0-24)
+  c2: -2.0 # Δlactate (tanh scaled)
+  r_alive: 1.0 # terminal alive bonus
+  r_dead: -1.0 # terminal death penalty
+  sofa_range: 24 # SOFA total range (0-24) for normalization
+  center: false # whether to zero–center rewards after computation
+
+# ------------------------------------------------------------------
+# Task-specific configurations
+# ------------------------------------------------------------------
+tasks:
+  vent:
+    # Output directory for ventilation task
+    output_dir: vent
+    # Action columns for mechanical ventilation
+    action_cols: [peep_bin, fio2_bin, tidal_volume_ibw_bin]
+    # Task-specific action file
+    action_file: task/aki_vent.csv
+    # Processed filenames
+    processed_files:
+      state: state.csv
+      trajectory: trajectory_vent.csv
+      pyg_graph: patient_traj_graph_vent.pt
+      ids_train: ids_train.npy
+      ids_val: ids_val.npy
+      ids_test: ids_test.npy
+    # Task description
+    description: "Mechanical ventilation strategy optimization"
+    
+  rrt:
+    # Output directory for RRT task
+    output_dir: rrt
+    # Action columns for renal replacement therapy
+    action_cols: [rrt_type_bin, rrt_dose_bin, blood_flow_bin, anticoagulation_bin]
+    # Task-specific action file
+    action_file: task/aki_rrt.csv
+    # Processed filenames
+    processed_files:
+      state: state.csv
+      trajectory: trajectory_rrt.csv
+      pyg_graph: patient_traj_graph_rrt.pt
+      ids_train: ids_train.npy
+      ids_val: ids_val.npy
+      ids_test: ids_test.npy
+    # Task description
+    description: "Renal replacement therapy strategy optimization"
+    
+  iv:
+    # Output directory for IV fluids/vasopressor task
+    output_dir: iv
+    # Action columns for IV fluids and vasopressors
+    action_cols: [iv_fluids_bin, vasopressor_bin]
+    # Task-specific action file
+    action_file: task/aki_ivfluids_vasopressor.csv
+    # Processed filenames
+    processed_files:
+      state: state.csv
+      trajectory: trajectory_iv.csv
+      pyg_graph: patient_traj_graph_iv.pt
+      ids_train: ids_train.npy
+      ids_val: ids_val.npy
+      ids_test: ids_test.npy
+    # Task description
+    description: "IV fluids and vasopressor strategy optimization"
+
+# ------------------------------------------------------------------
+# Shared raw data files (same for all tasks)
+# ------------------------------------------------------------------
+raw_files:
+  # Shared data files from Input/raw/shared/
+  vitals: shared/aki_vitalsigns_timeseries.csv
+  labres: shared/aki_labres_timeseries.csv
+  demographics: shared/aki_demographics.csv
+  sofa: shared/sofa_aki.csv
+  comorbidity: shared/aki_comorbidity.csv
+  # Mortality data (shared across all tasks)
+  mortality: shared/aki_90day_mortality.csv
+
+# ------------------------------------------------------------------
+# Legacy parameters (for backward compatibility)
+# ------------------------------------------------------------------
+train_test_split: 0.8
+k_hop: 2
+batch_size: 16
+
+# ------------------------------------------------------------------
+# Backward compatibility - these will be dynamically set based on task
+# ------------------------------------------------------------------
+# These fields are kept for backward compatibility but will be overridden
+# by task-specific configurations
+data_filename: patient_traj_graph_vent.pt  # Will be set dynamically
+action_cols: [peep_bin, fio2_bin, tidal_volume_ibw_bin]  # Will be set dynamically
+processed_files:  # Will be set dynamically
+  state: state.csv
+  trajectory: trajectory_vent.csv
+  pyg_graph: patient_traj_graph_vent.pt
+  ids_train: ids_train.npy
+  ids_val: ids_val.npy
+  ids_test: ids_test.npy

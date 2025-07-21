@@ -1,0 +1,26 @@
+# Deep Q-Network (DQN) baseline hyper-parameters
+# Two profiles are provided:
+#   1. original2015 – faithfully reproduces Mnih et al. (2015) Nature-DQN.
+#   2. enhanced      – modernised variant with Double‐Q, Dueling heads, Adam.
+
+profile: original2015
+
+# 全局设置 - 应用于所有profile
+reward_centering: false  # 禁用奖励中心化修复训练问题
+max_grad_norm: 2.0      # 梯度裁剪防止数值问题
+
+original2015:
+  learning_rate: 0.00025     # 2.5e-4
+  optimizer: rmsprop
+  target_update_freq: 10000
+  double_q: false
+  dueling: false
+  noisy: false
+
+enhanced:
+  learning_rate: 0.001
+  optimizer: adam
+  target_update_freq: 100
+  double_q: true
+  dueling: true
+  noisy: false

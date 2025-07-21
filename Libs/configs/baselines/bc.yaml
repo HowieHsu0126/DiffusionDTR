@@ -1,0 +1,7 @@
+# Behavioural Cloning (BC) baseline hyper-parameters
+lr: 3e-4
+batch_size: 256
+buffer_capacity: 100000
+target_update_freq: 500
+hidden_dim: 128
+label_smoothing: 0.1

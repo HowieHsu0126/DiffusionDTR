@@ -1,0 +1,9 @@
+# Conservative Q-learning (CQL) baseline hyper-parameters
+lr: 3e-4  # 从5e-4降低学习率以提升稳定性
+cql_alpha: 0.1  # 从1.0降低到0.1修复数值异常
+cql_target_gap: 5.0  # 从10.0降低到5.0
+batch_size: 64  # 从256降低到64以提升性能
+buffer_capacity: 500000
+target_update_freq: 1000  # 从10000降低到1000以提升训练效率
+hidden_dim: 128
+n_samples: 20
