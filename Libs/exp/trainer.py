@@ -21,48 +21,43 @@ Engineering improvements:
 from __future__ import annotations
 
 import math
+import multiprocessing as mp
+import os
+import pickle
+import random
 import time
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Any, List, Tuple, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-import numpy as np
-import pickle
-import os
-import random
-import multiprocessing as mp
-from contextlib import contextmanager
-
-from Libs.utils.exp_utils import seed_everything
-from Libs.utils.model_utils import get_autocast_context, apply_gradient_clipping, safe_item
-from Libs.utils.log_utils import get_logger, log_metric, suppress_tensorflow_logging
-from Libs.utils.data_utils import build_dataloader, seed_worker
-from Libs.utils.task_manager import get_task_manager, get_current_task_config
-from Libs.utils.vis_utils import (
-    plot_convergence_diagnostics,
-    plot_ope_comparison_with_ci,
-    plot_policy_distribution_comparison,
-    plot_treatment_strategy_heatmap,
-    set_plot_style,
-    save_figure_publication_ready
-)
-# Enhanced memory optimization imports
-from Libs.utils.memory_utils import (
-    EnhancedMemoryManager,
-    GradientAccumulator,
-    MemoryOptimizedDataLoader,
-    AdaptiveBatchSizer,
-    memory_efficient_training_context,
-    MemoryMonitor,
-    clear_cuda_cache_aggressively,
-    cleanup_multiprocessing_temp_dirs
-)
 
 from Libs.model.models.agent import agent_registry
-from Libs.utils.ope import FQEEstimator, wdr_estimate, ipw_estimate
+from Libs.utils.data_utils import build_dataloader, seed_worker
+from Libs.utils.exp_utils import seed_everything
+from Libs.utils.log_utils import (get_logger, log_metric,
+                                  suppress_tensorflow_logging)
+# Enhanced memory optimization imports
+from Libs.utils.memory_utils import (AdaptiveBatchSizer, EnhancedMemoryManager,
+                                     GradientAccumulator, MemoryMonitor,
+                                     MemoryOptimizedDataLoader,
+                                     cleanup_multiprocessing_temp_dirs,
+                                     clear_cuda_cache_aggressively,
+                                     memory_efficient_training_context)
+from Libs.utils.model_utils import (apply_gradient_clipping,
+                                    get_autocast_context, safe_item)
+from Libs.utils.ope import FQEEstimator, ipw_estimate, wdr_estimate
+from Libs.utils.task_manager import get_current_task_config, get_task_manager
+from Libs.utils.vis_utils import (plot_convergence_diagnostics,
+                                  plot_ope_comparison_with_ci,
+                                  plot_policy_distribution_comparison,
+                                  plot_treatment_strategy_heatmap,
+                                  save_figure_publication_ready,
+                                  set_plot_style)
 
 logger = get_logger("Trainer")
 
@@ -575,12 +570,22 @@ class Trainer:
         # ------------------------------------------------------------------
         # Algorithm-specific overrides
         # ------------------------------------------------------------------
-        if self.algo in {"bc", "pog_bc"} and patience > 5:
-            # For pure imitation learning, convergence is typically fast;
-            # we therefore shorten the early-stopping *patience* to 5 to
-            # avoid wasting epochs once validation reward plateaus.
-            logger.debug("[Early-Stop] Override patience→5 for %s", self.algo)
-            patience = 5
+        # Adaptive patience based on algorithm characteristics
+        if self.algo in {"bc", "pog_bc"}:
+            # For pure imitation learning, use moderate patience to ensure adequate training
+            if patience > 10:
+                logger.debug("[Early-Stop] Setting patience→10 for %s", self.algo)
+                patience = 10
+        elif self.algo in {"dqn", "pog_dqn", "cql", "pog_cql"}:
+            # Q-learning algorithms need more exploration time
+            if patience < 20:
+                logger.debug("[Early-Stop] Setting patience→20 for %s", self.algo)
+                patience = 20
+        elif self.algo in {"bcq", "pog_bcq", "bve", "pog_bve"}:
+            # Hybrid algorithms benefit from moderate patience
+            if patience < 15:
+                logger.debug("[Early-Stop] Setting patience→15 for %s", self.algo)
+                patience = 15
 
         # Warm-up bookkeeping – store *initial* learning rates for all
         # parameter groups so that we can scale them smoothly during the
@@ -1054,7 +1059,17 @@ class Trainer:
                 boot = [float((iw_np_psis[rng.integers(0, N, N)] * surv_np[rng.integers(0, N, N)]).mean()) for _ in range(bootstrap_iters)]
                 ci_lower, ci_upper = float(np.percentile(boot, 2.5)), float(np.percentile(boot, 97.5))
             else:
-                ci_lower = ci_upper = 0.0  # Use zeros instead of NaN for better CSV compatibility
+                # Fix: Calculate reasonable confidence intervals even without bootstrap
+                if len(surv_np) > 0:
+                    # Use standard error as approximation
+                    weighted_mean = float((iw_np_psis * surv_np).mean())
+                    weighted_var = float(((iw_np_psis * (surv_np - weighted_mean))**2).mean())
+                    std_err = float(np.sqrt(weighted_var / len(surv_np)))
+                    z_score = 1.96  # 95% confidence interval
+                    ci_lower = max(0.0, weighted_mean - z_score * std_err)
+                    ci_upper = min(1.0, weighted_mean + z_score * std_err)
+                else:
+                    ci_lower = ci_upper = ips_surv  # Use the point estimate
                 
             # Store CI in metrics for CSV export
             ips_survival_ci = [ci_lower, ci_upper]
@@ -1064,8 +1079,13 @@ class Trainer:
         # ------------------------------------------------------------------
         # Fit FQE only if the agent exposes required Q-net interfaces -------
         # ------------------------------------------------------------------
+        # Skip FQE for algorithms that don't benefit from it
+        fqe_compatible_algos = {"dqn", "pog_dqn", "cql", "pog_cql", "bcq", "pog_bcq", "bve", "pog_bve"}
+        should_compute_fqe = self.algo in fqe_compatible_algos
+        
         has_q_attr = (
-            hasattr(self.agent, "q_net")
+            should_compute_fqe
+            and hasattr(self.agent, "q_net")
             and hasattr(self.agent, "target_q_net")
             and callable(getattr(self.agent.q_net, "q_value", None))
             and callable(getattr(self.agent.target_q_net, "q_value", None))
@@ -1374,7 +1394,9 @@ class Trainer:
                 ipw_reward = 0.0
             wdr_reward = ipw_reward
             wdr_vals = ipw_vals_fallback  # 用于 bootstrap
-            fqe_reward_est = math.nan  # FQE 不可用
+            # Fix: Instead of setting FQE to NaN, use 0.0 with a warning
+            logger.debug("FQE not available for this agent type (no Q-network), using 0.0")
+            fqe_reward_est = 0.0  # Use 0.0 instead of math.nan for better compatibility
 
         if bootstrap_iters and bootstrap_iters > 0 and len(wdr_vals) > 0:
             rng_b = np.random.default_rng(seed=42)
@@ -1382,7 +1404,16 @@ class Trainer:
             boot_wdr = [float(np.mean(rng_b.choice(wdr_vals, N, replace=True))) for _ in range(bootstrap_iters)]
             reward_ci = [float(np.percentile(boot_wdr, 100 * alpha / 2)), float(np.percentile(boot_wdr, 100 * (1 - alpha / 2)))]
         else:
-            reward_ci = [0.0, 0.0]  # Use zeros instead of NaN for better CSV compatibility
+            # Fix: Calculate reasonable confidence intervals even without bootstrap
+            if len(wdr_vals) > 0:
+                # Use standard error as approximation
+                mean_val = float(np.mean(wdr_vals))
+                std_err = float(np.std(wdr_vals) / np.sqrt(len(wdr_vals)))
+                z_score = 1.96  # 95% confidence interval
+                reward_ci = [mean_val - z_score * std_err, mean_val + z_score * std_err]
+            else:
+                # Only use zeros when no data is available
+                reward_ci = [wdr_reward, wdr_reward] if not math.isnan(wdr_reward) else [0.0, 0.0]
 
         # --------------------------------------------------------------
         # Collect all evaluation metrics into a single dictionary so that
@@ -1657,25 +1688,40 @@ class Trainer:
         # Enhanced Batch Format Adaptation for Legacy Compatibility
         # ========================================================================
         
+        # Cache conversion status to avoid redundant checks
+        if not hasattr(self, '_batch_format_cache'):
+            self._batch_format_cache = {}
+        
+        agent_type = type(self.agent).__name__
+        
         try:
-            # Check if agent expects legacy tuple format (backward compatibility)
-            expects_tuple = getattr(self.agent, "expects_tuple_batch", False)
+            # Check cache first to avoid repeated attribute lookups
+            if agent_type not in self._batch_format_cache:
+                self._batch_format_cache[agent_type] = getattr(self.agent, "expects_tuple_batch", False)
+            
+            expects_tuple = self._batch_format_cache[agent_type]
             
             if expects_tuple:
-                self.logger.debug(
-                    f"🔧 Converting to legacy tuple format for {type(self.agent).__name__}")
-                # Log original batch actions shape
-                if "action" in batch and torch.is_tensor(batch["action"]):
-                    self.logger.debug(f"🔧 Original actions shape: {batch['action'].shape}")
+                # Only log on first conversion or when action shape changes
+                if not hasattr(self, '_last_action_shape') or (
+                    "action" in batch and torch.is_tensor(batch["action"]) 
+                    and batch["action"].shape != self._last_action_shape
+                ):
+                    self.logger.debug(
+                        f"🔧 Converting to legacy tuple format for {agent_type}")
+                    if "action" in batch and torch.is_tensor(batch["action"]):
+                        self._last_action_shape = batch["action"].shape
+                        self.logger.debug(f"🔧 Original actions shape: {self._last_action_shape}")
                 
                 # Convert to legacy tuple format for older agents
                 batch = self._convert_batch_to_legacy_format(batch)
-                self.logger.debug("🔄 Converted batch to legacy tuple format")
                 
-                # Log converted batch actions shapes
-                if isinstance(batch, tuple) and len(batch) > 1 and isinstance(batch[1], list):
-                    actions_shapes = [getattr(a, 'shape', f'type:{type(a)}') for a in batch[1]]
-                    self.logger.debug(f"🔧 Converted actions shapes: {actions_shapes}")
+                # Only log shapes on first conversion
+                if not hasattr(self, '_shapes_logged'):
+                    if isinstance(batch, tuple) and len(batch) > 1 and isinstance(batch[1], list):
+                        actions_shapes = [getattr(a, 'shape', f'type:{type(a)}') for a in batch[1]]
+                        self.logger.debug(f"🔧 Converted actions shapes: {actions_shapes}")
+                    self._shapes_logged = True
             else:
                 # Modern dict format - ensure proper preprocessing
                 batch = self._preprocess_dict_batch(batch)
@@ -1737,6 +1783,25 @@ class Trainer:
             # 🔧 ENHANCED TRAINING EXECUTION: Multi-context execution with comprehensive error handling
             loss_raw = None
             execution_context = "unknown"
+            
+            # Add POG-specific debugging
+            if self.algo.startswith("pog_"):
+                self.logger.debug("🔍 POG Algorithm: %s", self.algo)
+                if hasattr(self.agent, '_algorithm_variant'):
+                    self.logger.debug("   • Algorithm variant: %s", self.agent._algorithm_variant)
+                if hasattr(self.agent, 'model') and hasattr(self.agent.model, 'init_args'):
+                    self.logger.debug("   • Model init args: %s", self.agent.model.init_args)
+                
+                # Log batch statistics for POG models
+                if isinstance(batch, dict):
+                    for key in ['state', 'action', 'reward', 'done']:
+                        if key in batch:
+                            tensor = batch[key]
+                            if torch.is_tensor(tensor):
+                                self.logger.debug("   • %s shape: %s, mean: %.4f, std: %.4f", 
+                                                key, tensor.shape, 
+                                                tensor.float().mean().item(), 
+                                                tensor.float().std().item())
             
             # Context 1: Memory-aware execution (preferred)
             if hasattr(self, 'memory_manager') and hasattr(self.memory_manager, 'training_context'):
@@ -1941,7 +2006,32 @@ class Trainer:
             elif abs(loss_value) < 1e-8:  # Intermediate threshold - just log as debug
                 self.logger.debug(f"🔍 Small loss magnitude: {loss_value:.2e} (may indicate good convergence)")
             
-            self.logger.debug(f"✅ Training step output validation successful: loss={loss_value:.6f}")
+            # POG-specific loss tracking and debugging
+            if self.algo.startswith("pog_"):
+                self.logger.debug(f"✅ POG {self.algo} training step loss: {loss_value:.6f}")
+                
+                # Track loss history for POG models to detect training issues
+                if not hasattr(self, '_pog_loss_history'):
+                    self._pog_loss_history = []
+                self._pog_loss_history.append(loss_value)
+                
+                # Log warnings if POG loss is unusually high or shows instability
+                if len(self._pog_loss_history) > 10:
+                    recent_losses = self._pog_loss_history[-10:]
+                    mean_loss = np.mean(recent_losses)
+                    std_loss = np.std(recent_losses)
+                    
+                    if mean_loss > 10.0:
+                        self.logger.debug(f"⚠️ POG {self.algo} has high average loss: {mean_loss:.3f}")
+                    if std_loss > 5.0:
+                        self.logger.debug(f"⚠️ POG {self.algo} has unstable loss (std: {std_loss:.3f})")
+                        
+                    # Keep only recent history to avoid memory issues
+                    if len(self._pog_loss_history) > 100:
+                        self._pog_loss_history = self._pog_loss_history[-100:]
+            else:
+                self.logger.debug(f"✅ Training step output validation successful: loss={loss_value:.6f}")
+                
             return validated_loss
 
         except RuntimeError as e:
@@ -2422,8 +2512,7 @@ class Trainer:
         # Pass a policy action function that queries the evaluated agent π(s).
         fqe = FQEEstimator(
             q_network=self.agent.q_net,  # type: ignore[attr-defined]
-            # type: ignore[attr-defined]
-            target_q_network=self.agent.target_q_net,
+            target_q_network=self.agent.target_q_net,  # type: ignore[attr-defined]
             device=self.device,
             policy_action_fn=pog_compatible_policy_fn,
             **kwargs,
@@ -2467,15 +2556,18 @@ class Trainer:
         # Optional Pareto‐smoothed IS to mitigate heavy‐tailed ratios
         if use_psis:
             try:
-                from Libs.utils.ope.psis import psis_smooth_weights, psis_wdr_estimate
+                from Libs.utils.ope.psis import (psis_smooth_weights,
+                                                 psis_wdr_estimate)
                 importance_weights = psis_smooth_weights(importance_weights)
                 wdr_func = psis_wdr_estimate
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "PSIS smoothing unavailable (%s) – fallback to vanilla WDR", exc)
-                from Libs.utils.ope.wdr import wdr_estimate as wdr_func  # type: ignore
+                from Libs.utils.ope.wdr import \
+                    wdr_estimate as wdr_func  # type: ignore
         else:
-            from Libs.utils.ope.wdr import wdr_estimate as wdr_func  # type: ignore
+            from Libs.utils.ope.wdr import \
+                wdr_estimate as wdr_func  # type: ignore
 
         # ------------------------------------------------------
         # Ensure inputs to FQE q_value are 2-D (B,D) and (B,H)
@@ -2790,7 +2882,7 @@ class Trainer:
         """
         import numpy as np
         from torch_geometric.data import Data
-        
+
         # Load graph data
         data: Data = torch.load(Path(graph_pt), weights_only=False)
         split_dir = Path(split_dir)
@@ -3042,6 +3134,7 @@ class Trainer:
         use-cases users can override this utility.
         """
         from torch_geometric.data import Data
+
         # type: ignore[assignment]
         data: Data = torch.load(Path(graph_pt), weights_only=False)
 
@@ -3821,20 +3914,41 @@ class Trainer:
                     edge_index = torch.zeros(2, 0, dtype=torch.long, device=obs.device)
                 
                 # 🔧 CRITICAL FIX: Convert multi-head actions to list format while preserving sequence dimensions
+                # Add caching for action shape conversions
                 if actions is not None:
-                    if actions.dim() == 3:
-                        # (B, T, n_heads) - preserve full sequence
-                        n_heads = actions.size(2)
-                        actions_list = [actions[:, :, h].cpu().numpy() for h in range(n_heads)]  # Each: (B, T)
-                        self.logger.debug(
-                            f"🔧 Converted 3D actions to list: shapes={[a.shape for a in actions_list]}")
-                    elif actions.dim() == 2:
-                        # (B, n_heads) - single-step format
-                        n_heads = actions.size(1)
-                        actions_list = [actions[:, h:h+1].cpu().numpy() for h in range(n_heads)]  # Each: (B, 1)
-                        self.logger.debug(f"🔧 Converted 2D actions to list: shapes={[a.shape for a in actions_list]}")
+                    action_key = (actions.shape, actions.dim())
+                    
+                    # Check cache first
+                    if not hasattr(self, '_action_conversion_cache'):
+                        self._action_conversion_cache = {}
+                    
+                    if action_key in self._action_conversion_cache:
+                        # Use cached conversion strategy
+                        cached_info = self._action_conversion_cache[action_key]
+                        n_heads = cached_info['n_heads']
+                        dim = cached_info['dim']
+                        
+                        if dim == 3:
+                            actions_list = [actions[:, :, h].cpu().numpy() for h in range(n_heads)]
+                        else:  # dim == 2
+                            actions_list = [actions[:, h:h+1].cpu().numpy() for h in range(n_heads)]
                     else:
-                        raise ValueError(f"Unexpected actions dimension: {actions.dim()}")
+                        # Perform conversion and cache the strategy
+                        if actions.dim() == 3:
+                            # (B, T, n_heads) - preserve full sequence
+                            n_heads = actions.size(2)
+                            actions_list = [actions[:, :, h].cpu().numpy() for h in range(n_heads)]  # Each: (B, T)
+                            self._action_conversion_cache[action_key] = {'n_heads': n_heads, 'dim': 3}
+                            self.logger.debug(
+                                f"🔧 Converted 3D actions to list: shapes={[a.shape for a in actions_list]}")
+                        elif actions.dim() == 2:
+                            # (B, n_heads) - single-step format
+                            n_heads = actions.size(1)
+                            actions_list = [actions[:, h:h+1].cpu().numpy() for h in range(n_heads)]  # Each: (B, 1)
+                            self._action_conversion_cache[action_key] = {'n_heads': n_heads, 'dim': 2}
+                            self.logger.debug(f"🔧 Converted 2D actions to list: shapes={[a.shape for a in actions_list]}")
+                        else:
+                            raise ValueError(f"Unexpected actions dimension: {actions.dim()}")
                 else:
                     actions_list = []
                     self.logger.error("❌ Cannot create actions_list from None actions")

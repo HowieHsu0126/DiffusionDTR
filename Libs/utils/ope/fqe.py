@@ -10,17 +10,16 @@ underlying value network architecture – it reuses the agent's Q‐network.
 """
 from __future__ import annotations
 
-from typing import Dict, Tuple, Callable, List, Optional
 import copy
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-
-from Libs.utils.model_utils import get_autocast_context
 from Libs.utils.data_utils import build_dataloader
 from Libs.utils.exp_utils import seed_everything
+from Libs.utils.model_utils import get_autocast_context
+from torch.utils.data import DataLoader, Dataset
 
 __all__ = ["FQEEstimator"]
 
@@ -275,8 +274,8 @@ class FQEEstimator:
         use_psis: bool = True,
     ) -> Tuple[float, float, float]:
         """Returns mean ± CI for (P)SIS-WDR value estimate."""
-        from Libs.utils.ope.wdr import wdr_estimate
         from Libs.utils.ope.psis import psis_smooth_weights
+        from Libs.utils.ope.wdr import wdr_estimate
 
         rng = np.random.default_rng(seed)
         rewards = batch["reward"]

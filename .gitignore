@@ -1,8 +1,3 @@
-# ================================================
-# PoG-BVE Framework .gitignore
-# Comprehensive rules for Python ML research project
-# ================================================
-
 # ==========================================
 # ENVIRONMENT AND SECRETS
 # ==========================================
@@ -236,12 +231,4 @@ temp/
 !**/*.html
 
 # Keep configuration templates
-!config/*.example
-!config/*.template
-!config/*.sample
-
-# Keep test files
-!tests/
-!test_*.py
-!*_test.py
-notify_email.py
+!config/*

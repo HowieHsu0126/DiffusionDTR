@@ -21,27 +21,23 @@ from __future__ import annotations
 
 import argparse
 import json
-import pandas as pd
-from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
 import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import seaborn as sns
-from scipy import stats
-
 # Import our visualization utilities
-from Libs.utils.vis_utils import (
-    plot_ope_comparison_with_ci,
-    plot_policy_distribution_comparison,
-    plot_treatment_strategy_heatmap,
-    plot_convergence_diagnostics,
-    set_plot_style,
-    save_figure_publication_ready,
-    ICLR_COLORS,
-    MEDICAL_COLORS
-)
+from Libs.utils.vis_utils import (ICLR_COLORS, MEDICAL_COLORS,
+                                  plot_convergence_diagnostics,
+                                  plot_ope_comparison_with_ci,
+                                  plot_policy_distribution_comparison,
+                                  plot_treatment_strategy_heatmap,
+                                  save_figure_publication_ready,
+                                  set_plot_style)
+from scipy import stats
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +198,8 @@ class ResultsVisualizer:
     ) -> List[Path]:
         """Generate convergence analysis from TensorBoard logs."""
         try:
-            from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+            from tensorboard.backend.event_processing.event_accumulator import \
+                EventAccumulator
             
             log_dirs = list(tensorboard_logs.glob("*/tensorboard"))
             if not log_dirs:
@@ -433,12 +430,6 @@ def main():
     
     args = parser.parse_args()
     setup_logging(args.log_level)
-    
-    if args.interactive:
-        logger.info("🚀 Launching interactive dashboard...")
-        # TODO: Implement interactive dashboard
-        logger.warning("Interactive dashboard not yet implemented")
-        return
     
     # Initialize visualizer
     visualizer = ResultsVisualizer(

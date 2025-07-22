@@ -6,8 +6,8 @@ without introducing heavy dependencies such as *loguru*.
 from __future__ import annotations
 
 import logging
-import sys
 import os
+import sys
 import warnings
 from typing import Optional
 
@@ -27,6 +27,7 @@ class ColourFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: D401
         import sys
+
         # Disable colour codes when output is redirected to a file (i.e. not a TTY)
         use_colour = sys.stdout.isatty() or hasattr(sys, "ps1") or "ipykernel" in sys.modules
 

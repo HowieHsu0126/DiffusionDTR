@@ -7,7 +7,8 @@ action selection across different algorithm implementations.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Union, Tuple
+from typing import Any, Dict, Tuple, Union
+
 import torch
 import torch.nn as nn
 
@@ -100,7 +101,9 @@ class BaseRLAgent(ABC):
             except Exception as exc:
                 # Fall back gracefully when utility unavailable (unit tests)
                 import random
+
                 import numpy as np
+
                 # 注意：不要重新导入torch，因为它已经在模块级别导入了
                 random.seed(seed)
                 np.random.seed(seed)
@@ -270,7 +273,12 @@ class BaseRLAgent(ABC):
         return self._episode_count
 
     def _center_rewards(self, rewards: torch.Tensor, dim: int = 0) -> torch.Tensor:
-        """Conditionally center rewards around zero.
+        """Conditionally center rewards around zero with numerical stability.
+
+        This implementation follows Naik et al., 2024 "Reward Centering" to improve
+        discounted reinforcement learning performance by subtracting the empirical
+        average reward. The method is particularly effective when discount factors
+        approach 1 and is robust to constant reward shifts.
 
         Args:
             rewards: Reward tensor of any shape.
@@ -285,6 +293,7 @@ class BaseRLAgent(ABC):
         if not self.reward_centering:
             return rewards
 
+        # Compute batch mean with gradient detached
         batch_mean = rewards.mean(dim=dim, keepdim=True).detach()
 
         # Initialise running mean on first call — ensures correct dtype/device.
@@ -294,7 +303,21 @@ class BaseRLAgent(ABC):
             # Exponential moving average update µ ← (1-α)µ + α r̄_t
             self._reward_center = (1 - self.reward_center_alpha) * self._reward_center + self.reward_center_alpha * batch_mean
 
-        return rewards - self._reward_center
+        # Center rewards with numerical stability
+        centered_rewards = rewards - self._reward_center
+        
+        # Add numerical stability: prevent rewards from becoming too small
+        # This addresses the issue mentioned in DQN where centered rewards can lead to near-zero loss
+        reward_scale = rewards.abs().mean().detach()
+        if reward_scale > 0:
+            # Only apply scaling if original rewards have meaningful magnitude
+            min_scale = 1e-3  # Minimum scale to maintain numerical stability
+            if reward_scale < min_scale:
+                # Scale up centered rewards to maintain gradient flow
+                scale_factor = min_scale / reward_scale
+                centered_rewards = centered_rewards * scale_factor
+                
+        return centered_rewards
 
     @staticmethod
     def _assert_batch_obs_dims(obs: torch.Tensor) -> None:
@@ -361,3 +384,23 @@ class BaseRLAgent(ABC):
         if not torch.is_tensor(value):
             value = torch.as_tensor(value, dtype=torch.float32)
         self._reward_center = value
+
+    def get_reward_centering_stats(self) -> Dict[str, float]:
+        """Get statistics about reward centering for monitoring and debugging.
+        
+        Returns:
+            Dictionary containing:
+            - 'enabled': Whether reward centering is enabled
+            - 'center_value': Current reward center value (None if not initialized)
+            - 'alpha': EMA update rate
+        """
+        stats = {
+            'enabled': self.reward_centering,
+            'alpha': self.reward_center_alpha,
+            'center_value': None
+        }
+        
+        if self._reward_center is not None:
+            stats['center_value'] = self._reward_center.item() if self._reward_center.numel() == 1 else self._reward_center.mean().item()
+            
+        return stats

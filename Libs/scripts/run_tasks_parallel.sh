@@ -55,14 +55,13 @@ mkdir -p Output/logs
 # 检查CUDA设备
 check_cuda_devices
 
-# 任务配置 - 修复CUDA设备映射
+# 任务配置
 # 当CUDA_VISIBLE_DEVICES=0时，只有GPU 0可见，所以DEVICE=cuda:0
 # 当CUDA_VISIBLE_DEVICES=1时，只有GPU 1可见，所以DEVICE=cuda:0
-# 当CUDA_VISIBLE_DEVICES=2时，只有GPU 2可见，所以DEVICE=cuda:0
 declare -A task_configs=(
     ["iv"]="CUDA_VISIBLE_DEVICES=0 TASK=iv DEVICE=cuda:0"
     ["rrt"]="CUDA_VISIBLE_DEVICES=1 TASK=rrt DEVICE=cuda:0" 
-    ["vent"]="CUDA_VISIBLE_DEVICES=2 TASK=vent DEVICE=cuda:0"
+    ["vent"]="CUDA_VISIBLE_DEVICES=1 TASK=vent DEVICE=cuda:0"
 )
 
 # 存储进程ID

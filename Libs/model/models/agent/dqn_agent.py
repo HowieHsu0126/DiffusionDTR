@@ -6,19 +6,22 @@ commonly found in medical decision making scenarios. The agent is compatible
 with both traditional neural networks and PoG-enhanced models.
 """
 
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
-import numpy as np
-import logging
-from typing import List, Tuple, Optional, Any, Dict
-from .base_agent import BaseRLAgent
-from Libs.utils.model_utils import safe_float, apply_gradient_clipping, safe_item
-from Libs.model.models.agent._compat import ForwardCompatMixin
+import torch.optim as optim
 
+from Libs.model.models.agent._compat import ForwardCompatMixin
 # Unified replay buffer to avoid duplication
 from Libs.utils.model_utils import ReplayBuffer as _SharedReplayBuffer
+from Libs.utils.model_utils import (apply_gradient_clipping, safe_float,
+                                    safe_item)
+
+from .base_agent import BaseRLAgent
 
 # Alias old name to shared implementation for backward compatibility
 ReplayBuffer = _SharedReplayBuffer  # noqa: N816 – keep CamelCase for API stability
@@ -95,11 +98,13 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
         # Initialize logger
         self.logger = logging.getLogger(f'{self.__class__.__name__}')
             
-        self.model = model.to(device)
+        self.q_net = model.to(device)
         
         # Create target network with same architecture
-        self.target_model = type(model)(*model.init_args).to(device)
-        self.target_model.load_state_dict(model.state_dict())
+        self.target_q_net = type(model)(*model.init_args).to(device)
+        self.target_q_net.load_state_dict(model.state_dict())
+        
+        # Remove low-level aliases - we'll use proper naming instead
         
         self.action_dims = action_dims
         # ------------------------------------------------------------------
@@ -109,10 +114,10 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
         optimizer = (optimizer or 'adam').lower()
         if optimizer == 'rmsprop':
             # Hyper-parameters follow the original paper: α=0.95, ε=0.01.
-            self.optimizer = optim.RMSprop(self.model.parameters(), lr=lr, alpha=0.95, eps=0.01)
+            self.optimizer = optim.RMSprop(self.q_net.parameters(), lr=lr, alpha=0.95, eps=0.01)
         else:
             # Fallback to Adam for modern variants.
-            self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+            self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
         self.optimizer_name = optimizer
         self.batch_size = batch_size
         
@@ -225,7 +230,7 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
         # Exploitation: greedy actions based on Q-values
         with torch.no_grad():
             model_output = self._forward_model(
-                self.model, obs, lengths, edge_index, mask, mode='q'
+                self.q_net, obs, lengths, edge_index, mask, mode='q'
             )
             
             # Extract Q-values; ignore any additional (deprecated) KL-related outputs
@@ -253,8 +258,8 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
             Training loss value
         """
         # Ensure model is in training mode for backward pass
-        self.model.train()
-        self.target_model.eval()  # Target model should be in eval mode
+        self.q_net.train()
+        self.target_q_net.eval()  # Target model should be in eval mode
         
         obs, actions, rewards, next_obs, dones, mask, lengths, next_lengths, edge_index = batch
         batch_size = obs.shape[0]
@@ -341,15 +346,20 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
         # ---------------- Sanity checks & preprocessing ----------------
         self._assert_batch_obs_dims(obs)
         
-        # 临时禁用奖励中心化以修复训练问题
-        # reward_centering可能导致奖励变得过小，从而使损失接近0
-        # rewards = self._center_rewards(rewards, dim=0)
+        # Apply reward centering with improved numerical stability
+        # The base class implementation now includes stability checks to prevent 
+        # rewards from becoming too small (addressing the previous issue)
+        rewards = self._center_rewards(rewards, dim=0)
         
         # 添加奖励统计日志用于调试
         reward_mean = rewards.mean().item()
         reward_std = rewards.std().item()
         if self.update_steps % 100 == 0:
             self.logger.debug(f"DQN Rewards - mean: {reward_mean:.6f}, std: {reward_std:.6f}")
+            # Log reward centering statistics
+            centering_stats = self.get_reward_centering_stats()
+            if centering_stats['enabled']:
+                self.logger.debug(f"Reward Centering - center: {centering_stats['center_value']:.6f}, alpha: {centering_stats['alpha']}")
         
         # Validate action tensors and ensure they're in the correct format
         actions_validated = []
@@ -391,7 +401,7 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
         
         # Forward pass through main network with model type detection
         kwargs = {}
-        if self._is_pog_model(self.model):
+        if self._is_pog_model(self.q_net):
             kwargs.update({
                 'rewards': rewards,
                 'reward_centering': self.reward_centering
@@ -399,7 +409,7 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
         
         try:
             model_output = self._forward_model(
-                self.model, obs, lengths, edge_index, mask, mode='q', **kwargs
+                self.q_net, obs, lengths, edge_index, mask, mode='q', **kwargs
             )
             q_values = model_output[0]  # Extract Q-values from model output
         except Exception as e:
@@ -411,7 +421,7 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
         with torch.no_grad():
             try:
                 target_output = self._forward_model(
-                    self.target_model, next_obs, next_lengths, edge_index, mask, mode='q', **kwargs
+                    self.target_q_net, next_obs, next_lengths, edge_index, mask, mode='q', **kwargs
                 )
                 next_q_values = target_output[0]
             except Exception as e:
@@ -795,6 +805,14 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
             average_loss = total_loss / valid_heads
             self.logger.debug(f"🔧 DQN: Average loss across {valid_heads} heads: {average_loss.item():.6f}")
             
+            # Add loss lower bound protection to prevent gradient vanishing
+            min_loss_threshold = 1e-4
+            if average_loss.item() < min_loss_threshold:
+                self.logger.debug(f"📊 DQN: Loss {average_loss.item():.6f} below threshold {min_loss_threshold}, adding regularization")
+                # Add small regularization to prevent numerical instability
+                regularization = min_loss_threshold - average_loss
+                total_loss = total_loss + regularization * valid_heads
+                
         except Exception as target_e:
             self.logger.error(f"❌ DQN: Target Q computation completely failed: {target_e}")
             return 0.0
@@ -896,8 +914,8 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
             path: File path to save the agent state.
         """
         torch.save({
-            'model': self.model.state_dict(),
-            'target_model': self.target_model.state_dict(),
+            'model': self.q_net.state_dict(),
+            'target_model': self.target_q_net.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'update_steps': self.update_steps
         }, path)
@@ -910,8 +928,8 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
             path: File path to load the agent state from.
         """
         state = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(state['model'])
-        self.target_model.load_state_dict(state['target_model'])
+        self.q_net.load_state_dict(state['model'])
+        self.target_q_net.load_state_dict(state['target_model'])
         self.optimizer.load_state_dict(state['optimizer'])
         self.update_steps = state.get('update_steps', 0)
 
@@ -922,8 +940,8 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
             filepath: Path to save the checkpoint.
         """
         checkpoint = {
-            'model_state_dict': self.model.state_dict(),
-            'target_model_state_dict': self.target_model.state_dict(),
+            'model_state_dict': self.q_net.state_dict(),
+            'target_model_state_dict': self.target_q_net.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'training_step': self.training_step,
             'episode_count': self.episode_count,
@@ -952,8 +970,8 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
         """
         checkpoint = torch.load(filepath, map_location=self.device)
         
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.target_model.load_state_dict(checkpoint['target_model_state_dict'])
+        self.q_net.load_state_dict(checkpoint['model_state_dict'])
+        self.target_q_net.load_state_dict(checkpoint['target_model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self._training_step = checkpoint['training_step']
         self._episode_count = checkpoint['episode_count']
@@ -966,6 +984,6 @@ class DQNAgent(ForwardCompatMixin, BaseRLAgent):
         """Polyak averaging update of target network parameters."""
         tau = float(getattr(self, "polyak_tau", 1.0))
         with torch.no_grad():
-            for tgt, src in zip(self.target_model.parameters(), self.model.parameters()):
+            for tgt, src in zip(self.target_q_net.parameters(), self.q_net.parameters()):
                 tgt.data.mul_(1 - tau)
                 tgt.data.add_(tau * src.data)

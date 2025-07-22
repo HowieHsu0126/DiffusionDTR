@@ -6,18 +6,22 @@ decision making scenarios, incorporating behavioral constraints to prevent
 extrapolation errors in offline training.
 """
 
+import inspect
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
-import numpy as np
-from typing import List, Tuple, Optional, Any, Dict
-from .base_agent import BaseRLAgent
-import logging
-import inspect
-from Libs.utils.model_utils import init_weights_xavier
+import torch.optim as optim
+
 from Libs.model.models.agent._compat import ForwardCompatMixin
-from Libs.utils.model_utils import as_tensor, safe_float, apply_gradient_clipping, safe_item, ReplayBuffer
+from Libs.utils.model_utils import (ReplayBuffer, apply_gradient_clipping,
+                                    as_tensor, init_weights_xavier, safe_float,
+                                    safe_item)
+
+from .base_agent import BaseRLAgent
 
 # Import safe type conversion utility
 try:
@@ -38,6 +42,7 @@ except ImportError:
 
 # Unified replay buffer
 from Libs.utils.model_utils import ReplayBuffer
+
 
 class PerturbationActor(nn.Module):
     """
@@ -176,12 +181,12 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
         # Setup logger
         self.logger = logging.getLogger(f'{self.__class__.__name__}')
         
-        self.model = model.to(device)
-        self.target_model = type(model)(*model.init_args).to(device)
-        self.target_model.load_state_dict(model.state_dict())
+        self.q_net = model.to(device)
+        self.target_q_net = type(model)(*model.init_args).to(device)
+        self.target_q_net.load_state_dict(model.state_dict())
         
         self.action_dims = action_dims
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
         self.batch_size = batch_size
         self.perturbation_scale = perturbation_scale
         self.n_perturb_samples = n_perturb_samples
@@ -224,7 +229,8 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
         # ------------------------------------------------------------------
         if hasattr(BCQAgent, "_global_state_dim"):  # type: ignore[attr-defined]
             if state_dim != BCQAgent._global_state_dim:  # type: ignore[attr-defined]
-                import warnings, logging as _logging
+                import logging as _logging
+                import warnings
                 _logging.getLogger(__name__).warning(
                     "BCQAgent state_dim mismatch: prev=%d new=%d – overwriting for tests.",
                     BCQAgent._global_state_dim, state_dim)  # type: ignore[attr-defined]
@@ -288,7 +294,7 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
         # BCQ action selection with behavioral constraint
         with torch.no_grad():
             model_output = self._forward_model(
-                self.model, obs, lengths, edge_index, mask, mode='q'
+                self.q_net, obs, lengths, edge_index, mask, mode='q'
             )
             
             if isinstance(model_output, tuple):
@@ -518,8 +524,8 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
         # ------------------------------------------------------------------
         # The remainder of the method expects the legacy tuple format
         # ------------------------------------------------------------------
-        self.model.train()
-        self.target_model.eval()
+        self.q_net.train()
+        self.target_q_net.eval()
         
         obs, actions, rewards, next_obs, dones, mask, lengths, next_lengths, edge_index = batch
         
@@ -724,14 +730,14 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
         # **CRITICAL FIX**: Use unified BCQNet interface
         # Forward pass through main network  
         kwargs = {}
-        if self._is_pog_model(self.model):
+        if self._is_pog_model(self.q_net):
             kwargs.update({
                 'rewards': rewards,
                 'reward_centering': self.reward_centering
             })
         
         model_output = self._forward_model(
-            self.model, obs, lengths, edge_index, mask, mode='q', **kwargs
+            self.q_net, obs, lengths, edge_index, mask, mode='q', **kwargs
         )
         
         # Extract Q-values; discard deprecated KL outputs
@@ -740,14 +746,14 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
         # Forward pass through target network
         with torch.no_grad():
             target_kwargs = {}
-            if self._is_pog_model(self.target_model):
+            if self._is_pog_model(self.target_q_net):
                 target_kwargs.update({
                     'rewards': rewards,
                     'reward_centering': self.reward_centering
                 })
             
             target_output = self._forward_model(
-                self.target_model, next_obs, next_lengths, edge_index, mask, mode='q', **target_kwargs
+                self.target_q_net, next_obs, next_lengths, edge_index, mask, mode='q', **target_kwargs
             )
             next_q_values = target_output[0]
             
@@ -1381,7 +1387,7 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
 
         # Obtain current Q-values (no grad) for each head
         q_forward_out2 = self._forward_model(
-            self.model,
+            self.q_net,
             last_states.unsqueeze(1),
             torch.ones(last_states.size(0), dtype=torch.long, device=self.device),
             torch.empty((2, 0), dtype=torch.long, device=self.device),
@@ -1424,7 +1430,7 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
         if self.update_steps % self.target_update_freq == 0:
             # Polyak averaging instead of hard copy
             with torch.no_grad():
-                for tgt, src in zip(self.target_model.parameters(), self.model.parameters()):
+                for tgt, src in zip(self.target_q_net.parameters(), self.q_net.parameters()):
                     tgt.data.mul_(1 - self.soft_tau)
                     tgt.data.add_(self.soft_tau * src.data)
             self.logger.debug("🔄 [BCQ] Soft-updated target network (τ=%.4f) at step %d", self.soft_tau, self.update_steps)
@@ -1507,8 +1513,8 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
 
     def save(self, path):
         torch.save({
-            'model': self.model.state_dict(),
-            'target_model': self.target_model.state_dict(),
+            'model': self.q_net.state_dict(),
+            'target_model': self.target_q_net.state_dict(),
             'actor': self.actor.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'actor_optimizer': self.actor_optimizer.state_dict()
@@ -1516,8 +1522,8 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
 
     def load(self, path):
         state = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(state['model'])
-        self.target_model.load_state_dict(state['target_model'])
+        self.q_net.load_state_dict(state['model'])
+        self.target_q_net.load_state_dict(state['target_model'])
         self.actor.load_state_dict(state['actor'])
         self.optimizer.load_state_dict(state['optimizer'])
         self.actor_optimizer.load_state_dict(state['actor_optimizer'])
@@ -1529,8 +1535,8 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
             filepath: Path to save the checkpoint.
         """
         checkpoint = {
-            'model_state_dict': self.model.state_dict(),
-            'target_model_state_dict': self.target_model.state_dict(),
+            'model_state_dict': self.q_net.state_dict(),
+            'target_model_state_dict': self.target_q_net.state_dict(),
             'actor_state_dict': self.actor.state_dict(),
             'action_vae_state_dict': self.action_vae.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
@@ -1563,8 +1569,8 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
         """
         checkpoint = torch.load(filepath, map_location=self.device)
         
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.target_model.load_state_dict(checkpoint['target_model_state_dict'])
+        self.q_net.load_state_dict(checkpoint['model_state_dict'])
+        self.target_q_net.load_state_dict(checkpoint['target_model_state_dict'])
         self.actor.load_state_dict(checkpoint['actor_state_dict'])
         self.action_vae.load_state_dict(checkpoint['action_vae_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -1581,7 +1587,7 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
     @property
     def q_net(self):  # noqa: D401
         """Return the underlying Q-network (alias for :pyattr:`model`)."""
-        return self.model
+        return self.q_net
 
     @property
     def vae(self):  # noqa: D401
@@ -1624,7 +1630,7 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
             # the shared forward helper for consistent PoG/MLP handling.
             dummy_lengths = torch.ones(states.size(0), dtype=torch.long, device=states.device)
             empty_edge = torch.empty((2, 0), dtype=torch.long, device=states.device)
-            q_forward_out = self._forward_model(self.model, states.unsqueeze(1), dummy_lengths, empty_edge, None, mode='q')
+            q_forward_out = self._forward_model(self.q_net, states.unsqueeze(1), dummy_lengths, empty_edge, None, mode='q')
             q_values = q_forward_out[0] if isinstance(q_forward_out, tuple) else q_forward_out
 
         # Safety fallback
@@ -1819,11 +1825,7 @@ class MultiHeadReplayBuffer(ReplayBuffer):
         if obs.size(0) == 0:
             raise ValueError("Empty batch not supported")
 
-    def _center_rewards(self, rewards: torch.Tensor, dim: int = 0) -> torch.Tensor:
-        """Apply reward centering if enabled."""
-        if not self.reward_centering:
-            return rewards
-        return rewards - rewards.mean(dim=dim, keepdim=True)
+
 
     # 🔧 ENHANCED ERROR HANDLING AND DIAGNOSTICS
     def _get_batch_debug_info(self, batch_data) -> str:

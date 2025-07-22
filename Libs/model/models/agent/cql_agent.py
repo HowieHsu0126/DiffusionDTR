@@ -10,7 +10,7 @@ for out-of-distribution actions.
 import inspect
 import logging
 import math
-from typing import List, Optional, Tuple, Dict
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -18,15 +18,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from Libs.model.models.agent.base_agent import BaseRLAgent
 from Libs.model.models.agent._compat import ForwardCompatMixin
-from Libs.utils.model_utils import (
-    as_tensor,
-    safe_float,
-    apply_gradient_clipping,
-    safe_item,
-    ReplayBuffer,
-)
+from Libs.model.models.agent.base_agent import BaseRLAgent
+from Libs.utils.model_utils import (ReplayBuffer, apply_gradient_clipping,
+                                    as_tensor, safe_float, safe_item)
 
 
 class CQLAgent(ForwardCompatMixin, BaseRLAgent):
@@ -100,14 +95,14 @@ class CQLAgent(ForwardCompatMixin, BaseRLAgent):
         super().__init__(device=device, gamma=gamma,
                          target_update_freq=target_update_freq, reward_centering=reward_centering)
 
-        self.model = model.to(device)
+        self.q_net = model.to(device)
 
         # Create target network with same architecture
-        self.target_model = type(model)(*model.init_args).to(device)
-        self.target_model.load_state_dict(model.state_dict())
+        self.target_q_net = type(model)(*model.init_args).to(device)
+        self.target_q_net.load_state_dict(model.state_dict())
 
         self.action_dims = action_dims
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
         self.batch_size = batch_size
         self.cql_alpha = cql_alpha
         self.replay_buffer = ReplayBuffer(buffer_size)
@@ -185,7 +180,7 @@ class CQLAgent(ForwardCompatMixin, BaseRLAgent):
         # Exploitation: greedy actions based on Q-values
         with torch.no_grad():
             model_output = self._forward_model(
-                self.model, obs, lengths, edge_index, mask, mode='q'
+                self.q_net, obs, lengths, edge_index, mask, mode='q'
             )
 
             # Handle different output formats
@@ -219,8 +214,8 @@ class CQLAgent(ForwardCompatMixin, BaseRLAgent):
             Total loss for the training step.
         """
         # Ensure model is in training mode for backward pass
-        self.model.train()
-        self.target_model.eval()  # Target model should be in eval mode
+        self.q_net.train()
+        self.target_q_net.eval()  # Target model should be in eval mode
 
         # 🔧 CRITICAL FIX: Enhanced batch unpacking with shape validation
         try:
@@ -415,14 +410,14 @@ class CQLAgent(ForwardCompatMixin, BaseRLAgent):
         # 🔧 ENHANCED MODEL FORWARDING with proper kwargs handling
         try:
             kwargs = {}
-            if self._is_pog_model(self.model):
+            if self._is_pog_model(self.q_net):
                 kwargs.update({
                     'rewards': rewards,
                     'reward_centering': self.reward_centering
                 })
 
             model_output = self._forward_model(
-                self.model, obs, lengths, edge_index, mask, mode='q', **kwargs
+                self.q_net, obs, lengths, edge_index, mask, mode='q', **kwargs
             )
 
             # Extract Q-values; handle different output formats
@@ -439,14 +434,14 @@ class CQLAgent(ForwardCompatMixin, BaseRLAgent):
             # Forward pass through target network
             with torch.no_grad():
                 target_kwargs = {}
-                if self._is_pog_model(self.target_model):
+                if self._is_pog_model(self.target_q_net):
                     target_kwargs.update({
                         'rewards': rewards,
                         'reward_centering': self.reward_centering
                     })
 
                 target_output = self._forward_model(
-                    self.target_model, next_obs, next_lengths, edge_index, mask, mode='q', **target_kwargs
+                    self.target_q_net, next_obs, next_lengths, edge_index, mask, mode='q', **target_kwargs
                 )
 
                 if isinstance(target_output, tuple):
@@ -657,11 +652,19 @@ class CQLAgent(ForwardCompatMixin, BaseRLAgent):
                        self.cql_target_action_gap).detach())
         # Note: detach conservative penalty to avoid second-order gradients.
 
+        # Add loss lower bound protection to prevent gradient vanishing
+        min_loss_threshold = 1e-4
+        loss_value = total_loss.item()
+        if loss_value < min_loss_threshold:
+            self.logger.debug(f"📊 CQL: Loss {loss_value:.6f} below threshold {min_loss_threshold}, adding regularization")
+            regularization = min_loss_threshold - loss_value
+            total_loss = total_loss + regularization
+
         # Backward pass and optimization
         self.optimizer.zero_grad()
         total_loss.backward()
 
-        apply_gradient_clipping(self.model, max_norm=self.max_grad_norm)
+        apply_gradient_clipping(self.q_net, max_norm=self.max_grad_norm)
 
         self.optimizer.step()
 
@@ -689,7 +692,7 @@ class CQLAgent(ForwardCompatMixin, BaseRLAgent):
         # Update target network periodically
         self.update_steps += 1
         if self.update_steps % self.target_update_freq == 0:
-            self.target_model.load_state_dict(self.model.state_dict())
+            self.target_q_net.load_state_dict(self.q_net.state_dict())
 
         return safe_item(total_loss)
 
@@ -776,8 +779,8 @@ class CQLAgent(ForwardCompatMixin, BaseRLAgent):
             path: File path to save the agent state.
         """
         torch.save({
-            'model': self.model.state_dict(),
-            'target_model': self.target_model.state_dict(),
+            'model': self.q_net.state_dict(),
+            'target_model': self.target_q_net.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'update_steps': self.update_steps,
             'cql_alpha': self.cql_alpha
@@ -791,8 +794,8 @@ class CQLAgent(ForwardCompatMixin, BaseRLAgent):
             path: File path to load the agent state from.
         """
         state = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(state['model'])
-        self.target_model.load_state_dict(state['target_model'])
+        self.q_net.load_state_dict(state['model'])
+        self.target_q_net.load_state_dict(state['target_model'])
         self.optimizer.load_state_dict(state['optimizer'])
         self.update_steps = state.get('update_steps', 0)
         self.cql_alpha = state.get('cql_alpha', self.cql_alpha)
@@ -804,8 +807,8 @@ class CQLAgent(ForwardCompatMixin, BaseRLAgent):
             filepath: Path to save the checkpoint.
         """
         checkpoint = {
-            'model_state_dict': self.model.state_dict(),
-            'target_model_state_dict': self.target_model.state_dict(),
+            'model_state_dict': self.q_net.state_dict(),
+            'target_model_state_dict': self.target_q_net.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'alpha_optimizer_state_dict': self.alpha_optimizer.state_dict(),
             'log_alpha': self.log_alpha,
@@ -833,8 +836,8 @@ class CQLAgent(ForwardCompatMixin, BaseRLAgent):
         """
         checkpoint = torch.load(filepath, map_location=self.device)
 
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.target_model.load_state_dict(
+        self.q_net.load_state_dict(checkpoint['model_state_dict'])
+        self.target_q_net.load_state_dict(
             checkpoint['target_model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.alpha_optimizer.load_state_dict(
@@ -867,12 +870,12 @@ class CQLAgent(ForwardCompatMixin, BaseRLAgent):
         }
 
         q_values = self._forward_model(
-            self.model, obs, lengths, edge_index, mask, mode='q', **kwargs
+            self.q_net, obs, lengths, edge_index, mask, mode='q', **kwargs
         )[0]
 
         with torch.no_grad():
             next_q_values = self._forward_model(
-                self.target_model, next_obs, next_lengths, edge_index, mask, mode='q', **kwargs
+                self.target_q_net, next_obs, next_lengths, edge_index, mask, mode='q', **kwargs
             )[0]
 
         total_loss = 0.0

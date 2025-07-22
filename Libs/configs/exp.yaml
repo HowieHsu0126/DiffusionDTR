@@ -1,9 +1,9 @@
 experiment:
   seed: 42 # default seed
-  verbose: true # Enable verbose logging for debugging
-  device: cpu # CUDA device to use for training. [cuda:0, cuda:1, cuda:2, cuda:3]
+  verbose: false # Enable verbose logging for debugging
+  device: cuda:0 # CUDA device to use for training. [cpu, cuda:0, cuda:1, cuda:2, cuda:3]
   gamma: 0.99 # discount factor
-  n_epochs: 1 # default training epochs
+  n_epochs: 200 # default training epochs
   batch_size: 64 # default batch size
   bootstrap_iters: 1000 # default bootstrap resamples for CI
   ci_alpha: 0.05 # two-sided significance level for CI
@@ -59,7 +59,7 @@ experiment:
   visualization:
     enable: true # Enable automatic visualization generation
     style: "publication" # Visualization style: publication, presentation, poster
-    formats: ["png", "pdf"] # Output formats: png, pdf, svg, eps
+    formats: ["pdf"] # Output formats: png, pdf, svg, eps
     include_convergence: true # Generate convergence diagnostics
     include_strategy: false # Generate treatment strategy analysis (requires more computation)
     include_comparison: true # Generate algorithm comparison charts
@@ -89,7 +89,7 @@ model:
 
 # Reward processing hyper-parameters
 reward:
-  centering: false # 禁用奖励中心化 - 修复DQN训练损失为0的问题
+  centering: true
   centering_alpha: 0.001 # EMA step size α for running mean update
   scale_method: identity # {identity|sigmoid|tanh|none}
   temperature: 0.2 # softmax temperature for reward shaping
