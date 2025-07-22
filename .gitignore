@@ -1,0 +1,247 @@
+# ================================================
+# PoG-BVE Framework .gitignore
+# Comprehensive rules for Python ML research project
+# ================================================
+
+# ==========================================
+# ENVIRONMENT AND SECRETS
+# ==========================================
+# Environment files with sensitive information
+.env
+.env.local
+.env.*.local
+*.env
+
+# API keys and credentials
+config/secrets.yaml
+secrets/
+credentials/
+*.key
+*.pem
+*.crt
+
+# ==========================================
+# DATA AND OUTPUTS
+# ==========================================
+# Large data files and experiment outputs
+# Input/
+# Output/
+
+datasets/
+results/
+experiments/
+
+# Model files and checkpoints
+*.ckpt
+*.h5
+*.hdf5
+*.pth
+# *.pt
+*.model
+*.pkl
+*.pickle
+*.joblib
+
+# Compressed archives
+*.tar
+*.tar.gz
+*.tar.bz2
+*.zip
+*.rar
+*.7z
+*.gz
+*.bz2
+
+# Data formats
+*.tsv
+*.xlsx
+*.xls
+*.feather
+*.parquet
+*.npz
+# *.npy
+
+# ==========================================
+# PYTHON ENVIRONMENT
+# ==========================================
+# Python cache and bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+
+# Distribution and packaging
+build/
+dist/
+*.egg-info/
+.Python
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.conda/
+conda-meta/
+
+# ==========================================
+# JUPYTER AND NOTEBOOKS
+# ==========================================
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+*.nb.html
+
+# Jupyter runtime files
+.jupyter/
+jupyter_config/
+
+# ==========================================
+# DEVELOPMENT TOOLS
+# ==========================================
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# Code coverage
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+htmlcov/
+.pytest_cache/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Profiling and debugging
+.prof
+*.prof
+*.lprof
+
+# ==========================================
+# LOGGING AND MONITORING
+# ==========================================
+# Log files
+*.log
+*.out
+*.err
+*.pdf
+*.png
+logs/
+log/
+
+# TensorBoard logs
+runs/
+tensorboard/
+tb_logs/
+
+# Weights & Biases
+wandb/
+
+# ==========================================
+# SYSTEM FILES
+# ==========================================
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Linux
+*~
+.directory
+.fuse_hidden*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ==========================================
+# TEMPORARY FILES
+# ==========================================
+# Temporary directories and files
+tmp/
+temp/
+.tmp/
+*.tmp
+*.temp
+*.cache
+
+# Backup files
+*.bak
+*.backup
+*.old
+*.orig
+
+# ==========================================
+# SPECIFIC EXCLUSIONS (KEEP THESE)
+# ==========================================
+# Force include important files
+!.gitignore
+!README.md
+!LICENSE
+!requirements*.txt
+!.env.example
+!pyproject.toml
+!setup.py
+!setup.cfg
+
+# Keep all source code
+!**/*.py
+!**/*.ipynb
+!**/*.md
+!**/*.txt
+!**/*.json
+!**/*.yaml
+!**/*.yml
+!**/*.toml
+!**/*.cfg
+!**/*.ini
+
+# Keep documentation
+!docs/
+!**/*.rst
+!**/*.html
+
+# Keep configuration templates
+!config/*.example
+!config/*.template
+!config/*.sample
+
+# Keep test files
+!tests/
+!test_*.py
+!*_test.py
+notify_email.py
