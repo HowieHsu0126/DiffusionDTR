@@ -40,8 +40,8 @@ check_cuda_devices() {
     device_count=$(nvidia-smi --list-gpus | wc -l)
     log_info "Found $device_count CUDA devices"
     
-    if [ "$device_count" -lt 3 ]; then
-        log_warning "Only $device_count CUDA devices available, but we need 3 for parallel execution"
+    if [ "$device_count" -lt 2 ]; then
+        log_warning "Only $device_count CUDA devices available, but we need at least 2 for parallel execution"
         log_warning "Some tasks may run on the same device"
     fi
     
@@ -59,9 +59,9 @@ check_cuda_devices
 # 当CUDA_VISIBLE_DEVICES=0时，只有GPU 0可见，所以DEVICE=cuda:0
 # 当CUDA_VISIBLE_DEVICES=1时，只有GPU 1可见，所以DEVICE=cuda:0
 declare -A task_configs=(
-    ["iv"]="CUDA_VISIBLE_DEVICES=0 TASK=iv DEVICE=cuda:0"
+    # ["iv"]="CUDA_VISIBLE_DEVICES=0 TASK=iv DEVICE=cuda:0"
     ["rrt"]="CUDA_VISIBLE_DEVICES=1 TASK=rrt DEVICE=cuda:0" 
-    ["vent"]="CUDA_VISIBLE_DEVICES=1 TASK=vent DEVICE=cuda:0"
+    # ["vent"]="CUDA_VISIBLE_DEVICES=1 TASK=vent DEVICE=cuda:0"
 )
 
 # 存储进程ID

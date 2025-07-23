@@ -5,18 +5,21 @@ advanced training techniques including CQL regularization, branch normalization,
 flexible sampling strategies, and adaptive alpha tuning.
 """
 
+import copy
+import logging
 from typing import Dict, List, Optional, Tuple, Union
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-import logging
-import copy
 
 from Libs.model.models.agent.base_agent import BaseRLAgent
 from Libs.model.modules.bve_qnetwork import BranchValueEstimationQNetwork
 from Libs.utils.log_utils import get_logger
-from Libs.utils.model_utils import apply_gradient_clipping, safe_float, safe_item
+from Libs.utils.model_utils import (apply_gradient_clipping, safe_float,
+                                    safe_item)
+
 logger = get_logger(__name__)
 
 
@@ -408,6 +411,10 @@ class BranchValueEstimationAgent(BaseRLAgent):
                 )
             logger.debug(
                 "✅ Action support masks loaded for clinical constraint enforcement")
+        
+        # Configure valid action values to address data sparsity issues
+        self.valid_action_values = self._configure_valid_action_values(action_dims)
+        logger.debug(f"✅ Valid action values configured: {self.valid_action_values}")
 
         # ========================================================================
         # Comprehensive Configuration Summary for Reproducibility
@@ -566,9 +573,9 @@ class BranchValueEstimationAgent(BaseRLAgent):
         n_samples: int,
         mode: str = 'uniform'
     ) -> torch.Tensor:
-        """Samples actions for CQL loss computation.
+        """Samples actions for CQL loss computation with medical safety constraints.
 
-        This implementation enforces a 50 %/50 % blend when ``mode`` is
+        This implementation enforces a 50%/50% blend when ``mode`` is
         ``mixed`` so that the Conservative-Q gap estimation receives *both*
         behaviour‐agnostic uniform samples **and** on‐policy samples.  The
         previous version concatenated the two sets and then drew a second
@@ -576,28 +583,68 @@ class BranchValueEstimationAgent(BaseRLAgent):
         larger set.  When the policy distribution is highly peaked, that
         approach could severely under-sample unlikely actions, leading to an
         underestimated conservative gap.
+        
+        Medical Safety Enhancement:
+        This method now uses medical safety limits instead of raw action_dims
+        to prevent sampling from unrealistic action ranges that may exist in
+        corrupted data.
         """
         batch_size = state.size(0)
 
-        # Helper to draw uniform random actions, respecting optional masks.
-        def _uniform_sample() -> torch.Tensor:
-            if self.action_support_masks is not None:
-                branches = []
-                for branch_idx, adim in enumerate(self.action_dims):
-                    valid_idx = torch.where(
-                        self.action_support_masks[branch_idx])[0]
-                    if len(valid_idx) == 0:
-                        valid_idx = torch.arange(adim, device=self.device)
-                    branches.append(valid_idx[torch.randint(
-                        0, len(valid_idx), (batch_size, n_samples), device=self.device)])
-                return torch.stack(branches, dim=2)  # (B, n, 3)
+        # Use medical safety limits instead of raw action_dims for sampling
+        # This prevents sampling from corrupted data ranges that exceed medical safety
+        safe_action_dims = self.safe_max_indices
+        if safe_action_dims is None or len(safe_action_dims) != len(self.action_dims):
+            # Fallback: detect task and apply appropriate limits
+            task_type = self._detect_task_type(self.action_dims)
+            if task_type == "rrt":
+                safe_action_dims = [4, 4, 4, 1]  # Conservative RRT limits: indices 0-3, 0-3, 0-3, 0-1
+            elif task_type == "vent":
+                safe_action_dims = [6, 5, 5]    # Conservative VENT limits
+            elif task_type == "iv":
+                safe_action_dims = [3, 3]       # Conservative IV limits
             else:
-                # Dynamically generate samples for all action dimensions
-                branches = []
-                for action_dim in self.action_dims:
-                    branches.append(torch.randint(
-                        0, action_dim, (batch_size, n_samples), device=self.device))
-                return torch.stack(branches, dim=2)
+                # Use reduced limits for unknown tasks
+                safe_action_dims = [min(dim - 1, 4) for dim in self.action_dims]
+            
+            logger.warning(f"🔒 Using medical safety limits for {task_type} task: {safe_action_dims}")
+        
+        # Convert safety limits to actual action dimensions (add 1 for inclusive range)
+        safe_dims = [limit + 1 for limit in safe_action_dims]
+
+        # Helper to draw uniform random actions, respecting medical safety constraints and data distribution.
+        def _uniform_sample() -> torch.Tensor:
+            branches = []
+            for branch_idx, safe_dim in enumerate(safe_dims):
+                # Get valid action values for this branch (addresses data sparsity)
+                if branch_idx < len(self.valid_action_values):
+                    valid_actions = self.valid_action_values[branch_idx]
+                    # Further restrict by safety limits
+                    valid_actions = [a for a in valid_actions if a <= safe_dim]
+                else:
+                    # Fallback to range-based sampling
+                    valid_actions = list(range(min(safe_dim + 1, self.action_dims[branch_idx])))
+                
+                if len(valid_actions) == 0:
+                    logger.warning(f"⚠️ No valid actions for head {branch_idx}, using fallback")
+                    valid_actions = [0]  # Fallback to prevent errors
+                
+                # Apply action support masks if available
+                if self.action_support_masks is not None and branch_idx < len(self.action_support_masks):
+                    mask = self.action_support_masks[branch_idx]
+                    valid_actions = [a for a in valid_actions if a < len(mask) and mask[a]]
+                    if len(valid_actions) == 0:
+                        valid_actions = [0]  # Fallback
+                
+                # Sample from valid actions only
+                valid_tensor = torch.tensor(valid_actions, device=self.device)
+                random_indices = torch.randint(0, len(valid_actions), (batch_size, n_samples), device=self.device)
+                sampled_actions = valid_tensor[random_indices]
+                branches.append(sampled_actions)
+                
+                logger.debug(f"🎯 Head {branch_idx}: Sampling from valid actions {valid_actions}")
+                
+            return torch.stack(branches, dim=2)  # (B, n, H)
 
         if mode == 'uniform':
             return _uniform_sample()
@@ -606,10 +653,43 @@ class BranchValueEstimationAgent(BaseRLAgent):
         # Policy-based sampling (greedy) – shared by 'policy' & 'mixed'
         # ------------------------------------------------------------------
         with torch.no_grad():
-            policy_actions = self.q_net.greedy_action(
-                state).unsqueeze(1)  # (B,1,3)
-            # (B,n,3)
-            policy_actions = policy_actions.expand(-1, n_samples, -1)
+            # For policy-based sampling, we need to ensure greedy actions are also safe
+            policy_actions = self.q_net.greedy_action(state).unsqueeze(1)  # (B,1,H)
+            
+            # Apply valid action constraints to policy actions (not just safety limits)
+            for i, safe_dim in enumerate(safe_dims):
+                # Get valid actions for this head, considering both data distribution and safety
+                if i < len(self.valid_action_values):
+                    valid_actions = self.valid_action_values[i]
+                    # Further restrict by safety limits
+                    valid_actions = [a for a in valid_actions if a <= safe_dim]
+                else:
+                    # Fallback to range-based constraints
+                    actual_dim = min(safe_dim, self.action_dims[i])
+                    valid_actions = list(range(actual_dim))
+                
+                if len(valid_actions) == 0:
+                    logger.warning(f"⚠️ No valid policy actions for head {i}, using fallback")
+                    valid_actions = [0]
+                
+                # Map policy actions to nearest valid actions
+                head_actions = policy_actions[:, :, i]
+                valid_tensor = torch.tensor(valid_actions, device=self.device)
+                
+                # For each action, find the nearest valid action
+                corrected_actions = head_actions.clone()
+                for batch_idx in range(head_actions.shape[0]):
+                    for sample_idx in range(head_actions.shape[1]):
+                        current_action = int(head_actions[batch_idx, sample_idx].item())
+                        if current_action not in valid_actions:
+                            # Find nearest valid action
+                            nearest_valid = min(valid_actions, key=lambda x: abs(x - current_action))
+                            corrected_actions[batch_idx, sample_idx] = nearest_valid
+                
+                policy_actions[:, :, i] = corrected_actions
+                logger.debug(f"🎯 Policy Head {i}: Constrained to valid actions {valid_actions}")
+            
+            policy_actions = policy_actions.expand(-1, n_samples, -1)  # (B,n,H)
 
         if mode == 'policy':
             return policy_actions
@@ -620,11 +700,11 @@ class BranchValueEstimationAgent(BaseRLAgent):
             n_uniform = max(0, min(n_samples, n_uniform))
             n_policy = n_samples - n_uniform
 
-            uniform_part = _uniform_sample()[:, :n_uniform]  # (B, n_u, 3)
-            policy_part = policy_actions[:, :n_policy]       # (B, n_p, 3)
+            uniform_part = _uniform_sample()[:, :n_uniform]  # (B, n_u, H)
+            policy_part = policy_actions[:, :n_policy]       # (B, n_p, H)
 
             mixed = torch.cat([uniform_part, policy_part],
-                              dim=1)  # (B, n_samples, 3)
+                              dim=1)  # (B, n_samples, H)
             # Shuffle along the sample dimension to avoid positional bias.
             perm = torch.randperm(n_samples, device=self.device)
             mixed = mixed[:, perm]
@@ -1033,21 +1113,67 @@ class BranchValueEstimationAgent(BaseRLAgent):
             with torch.autocast(device_type='cuda' if self.device.type == 'cuda' else 'cpu', enabled=True):
                 q_values_list = []
 
+                # Get medical safety limits and valid action values for validation
+                safe_action_dims = self.safe_max_indices
+                if safe_action_dims is None or len(safe_action_dims) != len(self.action_dims):
+                    task_type = self._detect_task_type(self.action_dims)
+                    if task_type == "rrt":
+                        safe_action_dims = [4, 4, 4, 1]  # Conservative RRT limits
+                    elif task_type == "vent":
+                        safe_action_dims = [6, 5, 5]    # Conservative VENT limits
+                    elif task_type == "iv":
+                        safe_action_dims = [3, 3]       # Conservative IV limits
+                    else:
+                        safe_action_dims = [min(dim - 1, 4) for dim in self.action_dims]
+
                 for head_idx in range(len(self.action_dims)):
                     # Extract actions for current head: (batch_size, n_samples)
                     head_actions = sampled_actions[:, :, head_idx]
 
-                    # Validate action indices are within bounds (medical safety check)
+                    # Validate action indices are within valid action values and medical safety bounds
                     max_action = safe_item(head_actions.max())
                     min_action = safe_item(head_actions.min())
-
-                    if min_action < 0 or max_action >= self.action_dims[head_idx]:
+                    
+                    # Get valid action values for this head
+                    if head_idx < len(self.valid_action_values):
+                        valid_actions = set(self.valid_action_values[head_idx])
+                        valid_min = min(self.valid_action_values[head_idx])
+                        valid_max = max(self.valid_action_values[head_idx])
+                    else:
+                        # Fallback to range-based validation
+                        safe_max = safe_action_dims[head_idx] if head_idx < len(safe_action_dims) else self.action_dims[head_idx] - 1
+                        expected_max = min(safe_max, self.action_dims[head_idx] - 1)
+                        valid_actions = set(range(expected_max + 1))
+                        valid_min = 0
+                        valid_max = expected_max
+                    
+                    # Check if all actions are valid
+                    invalid_actions = []
+                    unique_actions = torch.unique(head_actions).cpu().tolist()
+                    for action_val in unique_actions:
+                        if int(action_val) not in valid_actions:
+                            invalid_actions.append(int(action_val))
+                    
+                    if invalid_actions or min_action < valid_min or max_action > valid_max:
                         logger.error(
                             f"❌ Invalid actions for head {head_idx}: "
-                            f"range [{min_action}, {max_action}], valid [0, {self.action_dims[head_idx]-1}]"
+                            f"range [{min_action}, {max_action}], valid actions: {sorted(valid_actions)}"
                         )
-                        raise RuntimeError(
-                            f"Action sampling generated invalid indices for head {head_idx}")
+                        if invalid_actions:
+                            logger.error(f"❌ Unseen action values: {invalid_actions} (not in training data)")
+                        
+                        # Apply intelligent clamping: map to nearest valid action
+                        corrected_actions = head_actions.clone()
+                        for invalid_val in invalid_actions:
+                            mask = (head_actions == invalid_val)
+                            # Find nearest valid action
+                            valid_list = sorted(valid_actions)
+                            nearest_valid = min(valid_list, key=lambda x: abs(x - invalid_val))
+                            corrected_actions[mask] = nearest_valid
+                            logger.debug(f"🔧 Mapped invalid action {invalid_val} to nearest valid {nearest_valid}")
+                        
+                        sampled_actions[:, :, head_idx] = corrected_actions  # Update the original tensor
+                        logger.warning(f"⚠️ Corrected invalid actions for head {head_idx} to valid action set")
 
                     # Compute Q-values for this head
                     q_head = self.q_net.compute_branch_q_values(
@@ -1234,29 +1360,79 @@ class BranchValueEstimationAgent(BaseRLAgent):
     #  Safety guard – clip actions to valid bins (0 … dim-1)
     # ------------------------------------------------------------------
     def _clip_actions(self, actions: torch.Tensor) -> torch.Tensor:
-        """Clamps discrete actions to medically safe ranges.
+        """Clamps discrete actions to medically safe ranges with enhanced task detection.
 
-        The default limits correspond to ICU ventilation safety guidelines:
-        * PEEP – full range retained.
-        * FiO₂ – highest bin (≈100 %) excluded to avoid hyperoxia.
-        * VT/kg – bins above 8 ml/kg excluded to ensure lung‐protective
-          ventilation.
+        This method now automatically detects the medical task and applies appropriate
+        safety constraints based on clinical guidelines. It prevents actions that could
+        be harmful or unrealistic in medical practice.
 
-        Users can override ``self.safe_max_indices`` at construction time to
-        relax or tighten the bounds:
+        Medical Safety Guidelines:
+        -------------------------
+        RRT Task - Renal Replacement Therapy:
+        * RRT Type: Conservative range [0-3] - Avoid experimental modalities
+        * RRT Dose: Conservative range [0-3] - Prevent overdialysis complications  
+        * Blood Flow: Conservative range [0-3] - Minimize hemodynamic stress
+        * Anticoagulation: Safe range [0-1] - Binary choice, both clinically acceptable
 
-        ```python
-        agent = BranchValueEstimationAgent(..., safe_max_indices=[6,5,4])
-        ```
+        VENT Task - Mechanical Ventilation:
+        * PEEP: Full range [0-6] - Conservative approach allows flexibility
+        * FiO₂: Exclude highest [0-5] - Prevent hyperoxia (FiO₂ >80%)
+        * Tidal Volume: Exclude highest [0-5] - Lung-protective ventilation (<8ml/kg)
+
+        IV Task - IV Fluids & Vasopressors:
+        * IV Fluids: Conservative range [0-3] - Prevent fluid overload
+        * Vasopressor: Conservative range [0-3] - Avoid excessive vasoconstriction
+
+        Users can override ``self.safe_max_indices`` at construction time.
         """
+        # Get medical safety limits with task-specific detection
         safe_max_indices = self.safe_max_indices
+        if safe_max_indices is None or len(safe_max_indices) != len(self.action_dims):
+            # Auto-detect task and apply appropriate medical safety limits
+            task_type = self._detect_task_type(self.action_dims)
+            if task_type == "rrt":
+                safe_max_indices = [3, 3, 3, 1]  # Conservative RRT limits  
+                logger.debug("🔒 Applying RRT medical safety limits: [3, 3, 3, 1]")
+            elif task_type == "vent":
+                safe_max_indices = [6, 5, 5]    # Conservative VENT limits
+                logger.debug("🔒 Applying VENT medical safety limits: [6, 5, 5]")
+            elif task_type == "iv":
+                safe_max_indices = [3, 3]       # Conservative IV limits
+                logger.debug("🔒 Applying IV medical safety limits: [3, 3]")
+            else:
+                # Generic fallback: conservative limits
+                safe_max_indices = [min(dim - 1, 4) for dim in self.action_dims]
+                logger.warning(f"⚠️ Unknown task {task_type}, using conservative limits: {safe_max_indices}")
 
-        if actions.dim() == 2:  # (B, 3)
-            for i, dim in enumerate(self.action_dims):
-                actions[:, i] = actions[:, i].clamp(0, safe_max_indices[i])
-        elif actions.dim() == 3:  # (B, k, 3)
-            for i, dim in enumerate(self.action_dims):
-                actions[..., i] = actions[..., i].clamp(0, safe_max_indices[i])
+        # Apply safety clipping with enhanced logging
+        original_actions = actions.clone()
+        
+        if actions.dim() == 2:  # (B, H) - Standard batch format
+            for i in range(min(len(self.action_dims), len(safe_max_indices))):
+                # Clamp to medical safety limits 
+                max_safe = min(safe_max_indices[i], self.action_dims[i] - 1)
+                actions[:, i] = actions[:, i].clamp(0, max_safe)
+                
+        elif actions.dim() == 3:  # (B, K, H) - Beam search format  
+            for i in range(min(len(self.action_dims), len(safe_max_indices))):
+                # Clamp to medical safety limits
+                max_safe = min(safe_max_indices[i], self.action_dims[i] - 1)
+                actions[..., i] = actions[..., i].clamp(0, max_safe)
+        
+        # Log if any actions were clipped for medical safety
+        if not torch.equal(original_actions, actions):
+            clipped_heads = []
+            for i in range(min(len(self.action_dims), len(safe_max_indices))):
+                if actions.dim() == 2:
+                    if not torch.equal(original_actions[:, i], actions[:, i]):
+                        clipped_heads.append(i)
+                elif actions.dim() == 3:
+                    if not torch.equal(original_actions[..., i], actions[..., i]):
+                        clipped_heads.append(i)
+            
+            if clipped_heads:
+                logger.debug(f"🔒 Applied medical safety clipping to heads: {clipped_heads}")
+        
         return actions
 
     def update_target(self) -> None:
@@ -1423,3 +1599,61 @@ class BranchValueEstimationAgent(BaseRLAgent):
         if len(masks) != len(self.action_dims):
             raise ValueError("Mask length mismatch")
         self.action_support_masks = [m.to(self.device).bool() for m in masks]
+
+    def _configure_valid_action_values(self, action_dims: List[int]) -> List[List[int]]:
+        """Configure valid action values based on task type and actual data distribution.
+        
+        This method addresses the data sparsity issue where some action values
+        are missing from the training data, causing Q-network instability when
+        sampling unseen actions.
+        
+        Args:
+            action_dims: List of action space dimensions
+            
+        Returns:
+            List of valid action values for each dimension
+            
+        Medical Data Quality Issues:
+        ----------------------------
+        RRT Task - Known data sparsity:
+        * RRT Type (Head 0): Only values [1, 2, 4] exist, missing [0, 3]
+        * Other heads: Full coverage [0, 1, 2, 3, 4] or [0, 1]
+        
+        This prevents sampling from unseen action combinations that cause
+        Q-network instability and extreme value generation.
+        """
+        task_type = self._detect_task_type(action_dims)
+        
+        if task_type == "rrt":
+            # Based on actual RRT data analysis from trajectory_rrt.csv
+            valid_values = [
+                [1, 2, 4],        # Head 0 (rrt_type_bin): Missing 0, 3
+                [0, 1, 2, 3, 4],  # Head 1 (rrt_dose_bin): Full coverage
+                [0, 1, 2, 3, 4],  # Head 2 (blood_flow_bin): Full coverage  
+                [0, 1]            # Head 3 (anticoagulation_bin): Full coverage
+            ]
+            logger.debug("🔍 RRT valid action values configured based on actual data distribution")
+            
+        elif task_type == "vent":
+            # Assume full coverage for VENT task (can be updated if needed)
+            valid_values = [
+                list(range(action_dims[0])),  # Head 0: 0-6
+                list(range(action_dims[1])),  # Head 1: 0-6  
+                list(range(action_dims[2]))   # Head 2: 0-6
+            ]
+            logger.debug("🔍 VENT valid action values: full coverage assumed")
+            
+        elif task_type == "iv":
+            # Assume full coverage for IV task (can be updated if needed)
+            valid_values = [
+                list(range(action_dims[0])),  # Head 0: 0-4
+                list(range(action_dims[1]))   # Head 1: 0-4
+            ]
+            logger.debug("🔍 IV valid action values: full coverage assumed")
+            
+        else:
+            # Generic fallback: assume full coverage
+            valid_values = [list(range(dim)) for dim in action_dims]
+            logger.warning(f"⚠️ Unknown task {task_type}, assuming full action coverage")
+            
+        return valid_values

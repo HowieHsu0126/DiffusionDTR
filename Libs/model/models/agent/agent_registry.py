@@ -8,15 +8,17 @@ modifying high-level orchestration code such as
 :class:`Libs.exp.train_rl.TrainingPipeline`.
 """
 from __future__ import annotations
-from typing import Any as _Any
-
-from typing import Callable, Dict, List, Optional, Any
 
 # Suppress all warnings for clean output
 import warnings
+from typing import Any
+from typing import Any as _Any
+from typing import Callable, Dict, List, Optional
+
 warnings.filterwarnings("ignore")
 
 import logging
+
 logger = logging.getLogger(__name__)
 
 _BUILDER_FN = Callable[[dict, dict, Any], Any]
@@ -445,6 +447,7 @@ for _k, _fn in (
 def _load_yaml_safe(path: str) -> dict:
     """Return YAML dict if *path* exists, else empty dict (no error)."""
     from pathlib import Path
+
     import yaml
 
     path = Path(path)
@@ -532,7 +535,8 @@ def _build_pog_backbone(state_dim: int, action_dims: list[int], hidden_dim: int 
     The architecture mirrors `Libs.model.modules.pog_module.PoG` with
     xsi-size hyper-parameters derived from *state_dim* / *hidden_dim*.
     """
-    from Libs.model.models.pog_model import PlanOnGraphModel as PoG  # use updated implementation
+    from Libs.model.models.pog_model import \
+        PlanOnGraphModel as PoG  # use updated implementation
 
     lstm_hidden = hidden_dim
     gcn_hidden = hidden_dim
@@ -608,9 +612,9 @@ def _pog_bve_builder(algo_cfg: dict, cfg: dict, model):  # noqa: D401
     """
 
     from Libs.model.models.agent.bve_agent import BranchValueEstimationAgent
-    from Libs.model.modules.pog_bve_qnetwork import PogBveQNetwork
     # local import to avoid GNN deps unless needed
     from Libs.model.models.pog_model import PlanOnGraphModel as PoG
+    from Libs.model.modules.pog_bve_qnetwork import PogBveQNetwork
 
     exp_cfg = cfg.get("experiment", {})
     model_cfg = cfg.get("model", {})
@@ -662,15 +666,19 @@ def _pog_bve_builder(algo_cfg: dict, cfg: dict, model):  # noqa: D401
             "state_dim", exp_cfg.get("state_dim", 64)))),
         action_dims=algo_cfg["action_dims"],
         q_net=q_net,
-        lr=model_cfg.get("learning_rate", 2e-4),  # Different from vanilla 3e-4
+        lr=model_cfg.get("learning_rate", 3e-4),  # Use standard learning rate
         gamma=exp_cfg.get("gamma", 0.99),
         device=algo_cfg.get("device", "cpu"),
         hidden_dim=int(model_cfg.get("hidden_dim", 128)),
-        # PoG-BVE specific settings
-        cql_target_gap=2.5,        # Different from default 1.0
-        lambda_reg=0.15,           # Different from default 0.1  
-        target_update_freq=200,    # Different from default 100
-        max_grad_norm=2.0,         # Different from default 1.0
+        # PoG-BVE specific settings - use more conservative values
+        cql_target_gap=5.0,        # Back to default value
+        lambda_reg=0.1,            # Back to default value  
+        target_update_freq=100,    # Back to default value
+        max_grad_norm=1.0,         # Back to default value
+        alpha=0.5,                 # Lower initial alpha for less conservative Q-values
+        cql_n_samples=20,          # More samples for better CQL estimation
+        normalize_branch=True,     # Ensure branch normalization
+        cql_sample_mode='mixed',   # Use mixed sampling for stability
     )
     
     # Add a marker to distinguish PoG-BVE
@@ -772,8 +780,9 @@ def _physician_policy_builder(algo_cfg: dict, cfg: dict, _unused_model):  # noqa
     """
 
     from pathlib import Path
-    import torch
+
     import numpy as np
+    import torch
 
     from Libs.model.models.baseline.physician_policy import PhysicianPolicy
     from Libs.utils.task_manager import get_task_manager

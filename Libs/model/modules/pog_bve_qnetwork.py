@@ -5,7 +5,8 @@ model as a feature backbone with Branch Value Estimation heads for structured
 multi-discrete action spaces.
 """
 
-from typing import List, Tuple, Optional, Union
+from typing import List, Optional, Tuple, Union
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -771,7 +772,16 @@ class PogBveQNetwork(nn.Module):
         
         batch_size, n_samples = actions.shape
         
-        # Forward pass to get all Q-values
+        # Validate action indices are within bounds
+        max_action = actions.max().item()
+        min_action = actions.min().item()
+        if min_action < 0 or max_action >= self.action_dims[branch_idx]:
+            raise ValueError(
+                f"Invalid actions for branch {branch_idx}: "
+                f"range [{min_action}, {max_action}], valid [0, {self.action_dims[branch_idx]-1}]"
+            )
+        
+        # Forward pass to get all Q-values (similar to standard BVE)
         q_values = self.forward(state)
         
         # Get Q-values for the specified branch

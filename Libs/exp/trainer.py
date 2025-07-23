@@ -1243,25 +1243,60 @@ class Trainer:
                 while policy_actions is None and fqe_attempts < max_fqe_attempts:
                     fqe_attempts += 1
                     try:
-                        # Attempt 1: Standard greedy action selection
+                        # Attempt 1: Standard greedy action selection with enhanced validation
                         if fqe_attempts == 1:
-                            self.logger.debug(f"🔧 FQE attempt {fqe_attempts}: Standard greedy action selection")
+                            self.logger.debug(f"🔧 FQE attempt {fqe_attempts}: Standard greedy action selection with validation")
                             # Ensure input is on the correct device
                             policy_actions = fqe.q_net.greedy_action(init_states_fqe.to(fqe.device))
                             
-                        # Attempt 2: Direct Q-network forward pass with manual argmax
+                            # 🔧 ENHANCED FQE ACTION VALIDATION: Apply agent's valid action constraints
+                            if hasattr(self.agent, 'valid_action_values') and self.agent.valid_action_values:
+                                self.logger.debug("🔧 Applying agent's valid action value constraints to FQE policy actions")
+                                for i, valid_actions in enumerate(self.agent.valid_action_values):
+                                    if i < policy_actions.size(1) and len(valid_actions) > 0:
+                                        head_actions = policy_actions[:, i]
+                                        # Map any out-of-range actions to nearest valid actions
+                                        valid_tensor = torch.tensor(valid_actions, device=policy_actions.device)
+                                        
+                                        # Find nearest valid action for each generated action
+                                        corrected_actions = head_actions.clone()
+                                        for action_idx in range(head_actions.size(0)):
+                                            current_action = head_actions[action_idx].item()
+                                            if current_action not in valid_actions:
+                                                # Find nearest valid action
+                                                nearest_valid = min(valid_actions, key=lambda x: abs(x - current_action))
+                                                corrected_actions[action_idx] = nearest_valid
+                                                
+                                        policy_actions[:, i] = corrected_actions
+                                        self.logger.debug(f"🔧 Head {i}: Applied valid action constraints {valid_actions}")
+                            
+                        # Attempt 2: Direct Q-network forward pass with manual argmax and constraints
                         elif fqe_attempts == 2:
-                            self.logger.debug(f"🔧 FQE attempt {fqe_attempts}: Manual Q-network forward pass")
+                            self.logger.debug(f"🔧 FQE attempt {fqe_attempts}: Manual Q-network forward pass with constraints")
                             with torch.no_grad():
                                 # Ensure input is on the correct device
                                 q_values_raw = fqe.q_net(init_states_fqe.to(fqe.device))
                                 if isinstance(q_values_raw, list):
-                                    # Multi-head Q-network: get argmax for each head
+                                    # Multi-head Q-network: get argmax for each head with constraints
                                     policy_actions_list = []
-                                    for q_head in q_values_raw:
+                                    for i, q_head in enumerate(q_values_raw):
                                         if q_head.dim() == 3:
                                             q_head = q_head[:, -1, :]  # Take last timestep
-                                        policy_actions_list.append(q_head.argmax(dim=-1))
+                                        
+                                        # Apply valid action constraints during argmax
+                                        if hasattr(self.agent, 'valid_action_values') and i < len(self.agent.valid_action_values):
+                                            valid_actions = self.agent.valid_action_values[i]
+                                            if len(valid_actions) > 0:
+                                                # Mask invalid actions with very negative values
+                                                q_masked = q_head.clone()
+                                                for action_idx in range(q_head.size(-1)):
+                                                    if action_idx not in valid_actions:
+                                                        q_masked[:, action_idx] = -1e9
+                                                policy_actions_list.append(q_masked.argmax(dim=-1))
+                                            else:
+                                                policy_actions_list.append(q_head.argmax(dim=-1))
+                                        else:
+                                            policy_actions_list.append(q_head.argmax(dim=-1))
                                     policy_actions = torch.stack(policy_actions_list, dim=1)
                                 else:
                                     # Single-head Q-network
@@ -1269,15 +1304,30 @@ class Trainer:
                                         q_values_raw = q_values_raw[:, -1, :]
                                     policy_actions = q_values_raw.argmax(dim=-1, keepdim=True)
                                     
-                        # Attempt 3: Use random valid actions as last resort
+                        # Attempt 3: Use constrained random valid actions as last resort
                         elif fqe_attempts == 3:
-                            self.logger.warning(f"🔧 FQE attempt {fqe_attempts}: Using random valid actions as fallback")
+                            self.logger.warning(f"🔧 FQE attempt {fqe_attempts}: Using constrained random valid actions as fallback")
                             batch_size = init_states_fqe.size(0)
                             n_action_heads = len(self.agent.action_dims)
                             policy_actions = torch.zeros(batch_size, n_action_heads, dtype=torch.long, device=target_device)
-                            for i, action_dim in enumerate(self.agent.action_dims):
-                                policy_actions[:, i] = torch.randint(0, action_dim, (batch_size,), device=target_device)
-                                
+                            
+                            # Use agent's valid action values if available
+                            if hasattr(self.agent, 'valid_action_values') and self.agent.valid_action_values:
+                                for i, valid_actions in enumerate(self.agent.valid_action_values):
+                                    if i < n_action_heads and len(valid_actions) > 0:
+                                        # Sample from valid actions only
+                                        valid_tensor = torch.tensor(valid_actions, device=target_device)
+                                        random_indices = torch.randint(0, len(valid_actions), (batch_size,), device=target_device)
+                                        policy_actions[:, i] = valid_tensor[random_indices]
+                                    else:
+                                        # Fallback to clipped random actions
+                                        action_dim = self.agent.action_dims[i]
+                                        policy_actions[:, i] = torch.randint(0, action_dim, (batch_size,), device=target_device)
+                            else:
+                                # Original fallback logic
+                                for i, action_dim in enumerate(self.agent.action_dims):
+                                    policy_actions[:, i] = torch.randint(0, action_dim, (batch_size,), device=target_device)
+                            
                         # Validate generated actions
                         if policy_actions is not None:
                             # Check for NaN/Inf values
@@ -1286,12 +1336,36 @@ class Trainer:
                                 policy_actions = None
                                 continue
                             
-                            # Check action bounds
+                            # 🔧 ENHANCED ACTION BOUNDS CHECK: Use agent's valid action constraints for clamping
                             for i, action_dim in enumerate(self.agent.action_dims):
                                 if i < policy_actions.size(1):
+                                    # Get valid actions for this head
+                                    if hasattr(self.agent, 'valid_action_values') and i < len(self.agent.valid_action_values):
+                                        valid_actions = self.agent.valid_action_values[i]
+                                        if len(valid_actions) > 0:
+                                            # Check against valid action values, not just dimension bounds
+                                            head_actions = policy_actions[:, i]
+                                            invalid_mask = torch.zeros_like(head_actions, dtype=torch.bool)
+                                            for batch_idx in range(head_actions.size(0)):
+                                                if head_actions[batch_idx].item() not in valid_actions:
+                                                    invalid_mask[batch_idx] = True
+                                            
+                                            if invalid_mask.any():
+                                                self.logger.warning(f"⚠️ FQE attempt {fqe_attempts}: Found {invalid_mask.sum().item()} invalid actions for head {i} (not in valid set {valid_actions}), mapping to nearest valid")
+                                                # Map to nearest valid actions
+                                                corrected_actions = head_actions.clone()
+                                                for batch_idx in range(head_actions.size(0)):
+                                                    if invalid_mask[batch_idx]:
+                                                        current_action = head_actions[batch_idx].item()
+                                                        nearest_valid = min(valid_actions, key=lambda x: abs(x - current_action))
+                                                        corrected_actions[batch_idx] = nearest_valid
+                                                policy_actions[:, i] = corrected_actions
+                                            continue
+                                    
+                                    # Fallback to original bounds checking
                                     invalid_actions = (policy_actions[:, i] < 0) | (policy_actions[:, i] >= action_dim)
                                     if invalid_actions.any():
-                                        self.logger.warning(f"⚠️ FQE attempt {fqe_attempts}: Found {invalid_actions.sum().item()} invalid actions for head {i}, clamping")
+                                        self.logger.warning(f"⚠️ FQE attempt {fqe_attempts}: Found {invalid_actions.sum().item()} invalid actions for head {i}, clamping to [0, {action_dim-1}]")
                                         policy_actions[:, i] = torch.clamp(policy_actions[:, i], 0, action_dim - 1)
                             
                             self.logger.debug(f"✅ FQE attempt {fqe_attempts}: Successfully generated policy actions with shape {policy_actions.shape}")

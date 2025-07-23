@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Optional, List
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -341,14 +341,28 @@ class ForwardCompatMixin:
     # Online Q-network ----------------------------------------------------
     @property
     def q_net(self):  # noqa: D401
+        if hasattr(self, "_q_net"):
+            return self._q_net
         if hasattr(self, "model"):
             return getattr(self, "model")
-        raise AttributeError("Agent has no attribute 'model' nor 'q_net'.")
+        raise AttributeError("Agent has no attribute '_q_net', 'model' nor 'q_net'.")
+
+    @q_net.setter
+    def q_net(self, value):
+        """Set the Q-network (online network)."""
+        self._q_net = value
 
     # Target Q-network ----------------------------------------------------
     @property
     def target_q_net(self):  # noqa: D401
+        if hasattr(self, "_target_q_net"):
+            return self._target_q_net
         if hasattr(self, "target_model"):
             return getattr(self, "target_model")
         # Fallback to online net when target unavailable (e.g. BC)
-        return self.q_net 
+        return self.q_net
+
+    @target_q_net.setter
+    def target_q_net(self, value):
+        """Set the target Q-network."""
+        self._target_q_net = value 

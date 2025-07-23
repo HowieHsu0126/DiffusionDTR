@@ -67,7 +67,7 @@ experiment:
     save_comparison: true # Save experiment-wide comparison charts
 
   # ---------------- Early-Stopping hyper-parameters ----------------
-  early_stop_metric: wdr_reward # metric monitored on validation set (wdr_reward, ipw_reward, ips_survival, fqe_est)
+  early_stop_metric: fqe_est # metric monitored on validation set (wdr_reward, ipw_reward, ips_survival, fqe_est)
   early_stop_patience: 15 # epochs without improvement before stop (increased for stability)
   early_stop_rel_delta: 0.001 # relative improvement threshold (increased for better convergence)
   early_stop_warmup: 5 # epochs to wait before monitoring metric (increased for warm-up)

@@ -181,9 +181,11 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
         # Setup logger
         self.logger = logging.getLogger(f'{self.__class__.__name__}')
         
-        self.q_net = model.to(device)
-        self.target_q_net = type(model)(*model.init_args).to(device)
-        self.target_q_net.load_state_dict(model.state_dict())
+        # Store Q-network using internal attribute to avoid property issues
+        self._q_net = model.to(device)
+        # Create target network
+        self._target_q_net = type(model)(*model.init_args).to(device)
+        self._target_q_net.load_state_dict(model.state_dict())
         
         self.action_dims = action_dims
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
@@ -1587,7 +1589,30 @@ class BCQAgent(ForwardCompatMixin, BaseRLAgent):
     @property
     def q_net(self):  # noqa: D401
         """Return the underlying Q-network (alias for :pyattr:`model`)."""
-        return self.q_net
+        if hasattr(self, "_q_net"):
+            return self._q_net
+        elif hasattr(self, "model"):
+            return self.model
+        else:
+            raise AttributeError("BCQAgent has no Q-network attribute")
+
+    @q_net.setter
+    def q_net(self, value):
+        """Set the Q-network."""
+        self._q_net = value
+
+    @property
+    def target_q_net(self):  # noqa: D401
+        """Return the target Q-network."""
+        if hasattr(self, "_target_q_net"):
+            return self._target_q_net
+        else:
+            raise AttributeError("BCQAgent has no target Q-network attribute")
+
+    @target_q_net.setter
+    def target_q_net(self, value):
+        """Set the target Q-network."""
+        self._target_q_net = value
 
     @property
     def vae(self):  # noqa: D401
